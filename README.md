@@ -96,7 +96,7 @@ skychat-ai update                 # 更新到最新版
 | Kimi (Moonshot) | moonshot-v1-8k | `skychat-ai set kimi <key>` | [申请](https://platform.moonshot.cn/console/api-keys) |
 | OpenRouter | 300+ 第三方模型 | `skychat-ai set openrouter <key>` | [申请](https://openrouter.ai/settings/keys) |
 
-支持任何 OpenAI 兼容 API，编辑 `~/.wai/config.json` 即可添加。
+支持任何 OpenAI 兼容 API，编辑 `~/.skychat-ai/config.json` 即可添加。
 
 所有模型均通过 [claw-agent-sdk](https://github.com/anxiong2025/claw-agent-sdk) 获得 Agent 能力，支持搜索网页、读写文件、执行代码。Claude 另外通过 [Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript) 接入，提供最强质量。
 
@@ -138,11 +138,11 @@ v0.4.0 起，所有模型均具备 Agent 能力：搜索网页、查天气资讯
 
 ## 高级配置
 
-配置文件位于 `~/.wai/config.json`，以下为可选的高级功能。
+配置文件位于 `~/.skychat-ai/config.json`，以下为可选的高级功能。
 
 ### Discord 渠道
 
-在 `~/.wai/config.json` 中启用并填入 Bot Token：
+在 `~/.skychat-ai/config.json` 中启用并填入 Bot Token：
 
 ```json
 {
@@ -160,7 +160,7 @@ Bot Token 在 [Discord Developer Portal](https://discord.com/developers/applicat
 
 ### WhatsApp 渠道
 
-在 `~/.wai/config.json` 中启用：
+在 `~/.skychat-ai/config.json` 中启用：
 
 ```json
 {
@@ -301,7 +301,7 @@ skychat-ai 网关
 src/
 ├── cli.ts                    命令行入口
 ├── gateway.ts                消息网关 & 会话管理 & Webhook 服务
-├── config.ts                 配置管理 (~/.wai/config.json)
+├── config.ts                 配置管理 (~/.skychat-ai/config.json)
 ├── types.ts                  核心接口定义
 ├── mcp.ts                    MCP 客户端管理
 ├── asr.ts                    语音转文字 (Whisper)

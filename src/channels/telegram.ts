@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url);
  * Telegram Bot 渠道适配器
  * 基于 grammY 框架，参照 openclaw 的 Telegram 实现模式
  *
- * 配置示例 (~/.wai/config.json):
+ * 配置示例 (~/.skychat-ai/config.json):
  * {
  *   "channels": {
  *     "telegram": {
@@ -44,7 +44,7 @@ export class TelegramChannel implements Channel {
   async start(onMessage: (msg: InboundMessage) => void): Promise<void> {
     if (!this.token) {
       throw new Error(
-        "Telegram Bot Token 未配置。请在 ~/.wai/config.json 的 channels.telegram.token 中设置",
+        "Telegram Bot Token 未配置。请在 ~/.skychat-ai/config.json 的 channels.telegram.token 中设置",
       );
     }
 

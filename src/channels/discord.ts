@@ -21,7 +21,7 @@ export class DiscordChannel implements Channel {
   async start(onMessage: (msg: InboundMessage) => void): Promise<void> {
     const token = this.config.token as string;
     if (!token) {
-      throw new Error("Discord Bot Token 未配置。请在 ~/.wai/config.json 的 channels.discord.token 中设置");
+      throw new Error("Discord Bot Token 未配置。请在 ~/.skychat-ai/config.json 的 channels.discord.token 中设置");
     }
 
     let discordjs: any;

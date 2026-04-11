@@ -330,7 +330,7 @@ export class Gateway {
           || (envKey && process.env[envKey])
           || provConfig?.type === "claude-agent"; // claude-agent has its own auth (SDK / ~/.claude)
         if (!hasAuth) {
-          c.response = `当前模型 ${c.provider} 未配置 API Key，请在终端执行:\nwechat-ai set ${c.provider} <your-key>`;
+          c.response = `当前模型 ${c.provider} 未配置 API Key，请在终端执行:\nskychat-ai set ${c.provider} <your-key>`;
           return;
         }
 
@@ -735,7 +735,7 @@ export class Gateway {
           if (!this.providers.has("openrouter")) {
             await channel.send({
               targetId: msg.senderId,
-              text: "需要先配置 OpenRouter API Key:\nwechat-ai set openrouter <key>\n\n获取 Key: openrouter.ai",
+              text: "需要先配置 OpenRouter API Key:\nskychat-ai set openrouter <key>\n\n获取 Key: openrouter.ai",
               replyToken: msg.replyToken,
             });
           } else {
@@ -867,7 +867,7 @@ export class Gateway {
         await channel.send({
           targetId: msg.senderId,
           text: [
-            "wechat-ai 指令:",
+            "skychat-ai 指令:",
             "/model [名称] - 切换AI模型",
             "/model vendor/model - 第三方模型",
             "/skill [名称] - 切换技能 (off 关闭)",
@@ -894,7 +894,7 @@ export class Gateway {
             "@模型名 <问题> - 临时用指定模型",
             "@画图 <描述> - 生成图片",
             "",
-            "📖 更多: https://github.com/anxiong2025/wechat-ai/blob/main/docs/guide.md",
+            "📖 更多: https://github.com/claudeskydream-hash/skychat-ai/blob/main/docs/guide.md",
           ].join("\n"),
           replyToken: msg.replyToken,
         });
@@ -920,7 +920,7 @@ export class Gateway {
           "🤖 所有模型均支持: 搜索 · 天气 · 资讯 · 文件 · 命令",
           "",
           "/help 查看全部指令",
-          "📖 更多: https://github.com/anxiong2025/wechat-ai/blob/main/docs/guide.md",
+          "📖 更多: https://github.com/claudeskydream-hash/skychat-ai/blob/main/docs/guide.md",
         ].join("\n");
         await channel.send({
           targetId: msg.senderId,

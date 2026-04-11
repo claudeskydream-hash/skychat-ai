@@ -59,7 +59,7 @@ export class McpManager {
     }
 
     const client = new Client(
-      { name: "wechat-ai", version: "0.1.0" },
+      { name: "skychat-ai", version: "0.1.0" },
       { capabilities: {} },
     );
 

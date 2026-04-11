@@ -102,7 +102,7 @@ export class WhatsAppChannel implements Channel {
           : this.authState.keys,
       },
       logger: silentLogger,
-      browser: ["wechat-ai", "Chrome", "1.0.0"],
+      browser: ["skychat-ai", "Chrome", "1.0.0"],
     });
 
     this.sock.ev.on("creds.update", this.saveCreds);
@@ -137,7 +137,7 @@ export class WhatsAppChannel implements Channel {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
 
         if (statusCode === 401) {
-          log.warn("WhatsApp 已登出，请运行 wechat-ai logout whatsapp 后重新启动");
+          log.warn("WhatsApp 已登出，请运行 skychat-ai logout whatsapp 后重新启动");
           this.running = false;
           return;
         }

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { WaiConfig } from "./types.js";
 
-const WAI_DIR = join(homedir(), ".wai");
+const WAI_DIR = join(homedir(), ".skychat-ai");
 const CONFIG_PATH = join(WAI_DIR, "config.json");
 
 const DEFAULT_CONFIG: WaiConfig = {
