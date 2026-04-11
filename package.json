@@ -1,0 +1,65 @@
+{
+  "name": "skychat-ai",
+  "version": "0.6.0",
+  "description": "Multi-channel AI Bot — Bridge WeChat, Telegram, Discord, WhatsApp to Claude, Qwen, DeepSeek and more",
+  "type": "module",
+  "bin": {
+    "wechat-ai": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src/",
+    "clean": "rm -rf dist"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "keywords": [
+    "wechat",
+    "weixin",
+    "claude",
+    "openai",
+    "gemini",
+    "ai",
+    "bot",
+    "gateway",
+    "agent",
+    "deepseek",
+    "qwen",
+    "discord",
+    "whatsapp",
+    "telegram"
+  ],
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.81",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "claw-agent-sdk": "^0.1.0",
+    "discord.js": "^14.26.0",
+    "grammy": "^1.36.0",
+    "https-proxy-agent": "^9.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "socks-proxy-agent": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0"
+  }
+}
