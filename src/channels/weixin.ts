@@ -1,6 +1,7 @@
 import { createLogger } from "../logger.js";
-import { getAccountsDir, ensureDir } from "../config.js";
+import { getAccountsDir, ensureDir, loadConfig } from "../config.js";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { readFile, writeFile, unlink } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, randomUUID, createDecipheriv, createCipheriv } from "node:crypto";
@@ -126,6 +127,8 @@ export class WeixinChannel implements Channel {
   private guideSentCache = new Set<string>();
   // Whether startup greeting was already sent proactively
   private startupGreetingSent = false;
+  // Whether no model provider has API key configured
+  private noModelConfigured = false;
 
   constructor(config: ChannelConfig) {
     this.config = config;
@@ -253,6 +256,13 @@ export class WeixinChannel implements Channel {
     await this.loadLastTokens();
     this.running = true;
     log.info(`已上线 (${maskId(this.account!.accountId)})`);
+
+    // Check if any model provider has API key configured
+    const hasModel = await this.checkModelConfigured();
+    if (!hasModel) {
+      this.noModelConfigured = true;
+      log.warn("尚未配置任何模型的 API Key");
+    }
 
     // Send startup greeting to known users (with saved tokens)
     // Fresh scan: no tokens, greeting + guide will be sent on first message
@@ -1166,6 +1176,49 @@ export class WeixinChannel implements Channel {
     await writeFile(this.guideSentFile(), JSON.stringify([...sent]));
   }
 
+  /** Check if any provider has a usable API key configured */
+  private async checkModelConfigured(): Promise<boolean> {
+    try {
+      const config = await loadConfig();
+      for (const prov of Object.values(config.providers)) {
+        if (prov.apiKey) return true;
+        const envKey = (prov as Record<string, unknown>).apiKeyEnv as string | undefined;
+        if (envKey && process.env[envKey]) return true;
+        if (prov.type === "claude-agent") {
+          if (existsSync(join(homedir(), ".claude")) || process.env.ANTHROPIC_API_KEY) return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Get model setup hint text (sent when no model is configured) */
+  private getModelSetupHint(): string {
+    const configPath = join(homedir(), ".skychat-ai", "config.json");
+    return [
+      "⚠️ 尚未配置 AI 模型，无法正常对话",
+      "",
+      "请在终端执行以下命令设置模型 API Key:",
+      "  skychat-ai set qwen <你的Key>",
+      "  skychat-ai set deepseek <你的Key>",
+      "  skychat-ai set gpt <你的Key>",
+      "",
+      "设置默认模型:",
+      "  skychat-ai use qwen",
+      "",
+      `📁 配置文件: ${configPath}`,
+      "",
+      "获取 API Key:",
+      "  通义千问: dashscope.console.aliyun.com",
+      "  DeepSeek: platform.deepseek.com",
+      "  OpenAI: platform.openai.com",
+      "",
+      "设置完成后重新发消息即可开始对话",
+    ].join("\n");
+  }
+
   private getGuideText(): string {
     return [
       "📌 快捷指南:",
@@ -1200,6 +1253,19 @@ export class WeixinChannel implements Channel {
         await new Promise((r) => setTimeout(r, 500));
       }
 
+      // If no model configured, send setup hint instead of normal guide
+      if (this.noModelConfigured) {
+        if (!this.guideSentCache.has(userId)) {
+          await this.send({ targetId: userId, text: this.getModelSetupHint(), replyToken: token });
+          this.guideSentCache.add(userId);
+          const guideSent = await this.loadGuideSent();
+          guideSent.add(userId);
+          await this.saveGuideSent(guideSent);
+          log.debug(`已发送模型配置提示给 ${maskId(userId)}`);
+        }
+        return;
+      }
+
       // Send guide if not sent before
       if (!this.guideSentCache.has(userId)) {
         const guideSent = await this.loadGuideSent();
@@ -1229,10 +1295,11 @@ export class WeixinChannel implements Channel {
     for (const [userId, token] of this.lastTokens) {
       try {
         await this.send({ targetId: userId, text: greeting, replyToken: token });
-        // Also send guide if not sent before
+        // Send model setup hint or normal guide
         if (!guideSent.has(userId)) {
           await new Promise((r) => setTimeout(r, 500));
-          await this.send({ targetId: userId, text: this.getGuideText(), replyToken: token });
+          const text = this.noModelConfigured ? this.getModelSetupHint() : this.getGuideText();
+          await this.send({ targetId: userId, text, replyToken: token });
           guideSent.add(userId);
           this.guideSentCache.add(userId);
         }

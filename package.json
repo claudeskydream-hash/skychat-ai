@@ -1,6 +1,6 @@
 {
   "name": "skychat-ai",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Multi-channel AI Bot — Bridge WeChat, Telegram, Discord, WhatsApp to Claude, Qwen, DeepSeek and more",
   "type": "module",
   "bin": {

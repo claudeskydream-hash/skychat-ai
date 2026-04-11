@@ -103,6 +103,7 @@ function printBanner(defaultProvider: string): void {
   ];
 
   const welcome = `${c.bold}${c.white}Welcome!${c.reset}`;
+  const cwd = `${c.dim}cwd: ${process.cwd()}${c.reset}`;
   const info = defaultProvider
     ? `${c.dim}model: ${defaultProvider} · type /help in chat${c.reset}`
     : `${c.dim}type /help in chat${c.reset}`;
@@ -117,6 +118,7 @@ function printBanner(defaultProvider: string): void {
   }
   console.log(empty);
   console.log(center(info));
+  console.log(center(cwd));
   console.log(`  ${b}╰${"─".repeat(inner)}╯${c.reset}`);
   console.log();
 }
