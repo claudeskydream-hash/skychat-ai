@@ -1,17 +1,17 @@
-# wechat-ai
+# skychat-ai
 
 多渠道 AI 机器人 — 一条命令连接微信、Discord、WhatsApp 与任意 AI 模型。
 
 基于微信官方 iLink Bot API 构建，合规、稳定、不怕封号。同时支持 Discord Bot 和 WhatsApp 渠道。
 
 <p align="center">
-  <img src="docs/screenshot.png" width="800" alt="wechat-ai screenshot" />
+  <img src="docs/screenshot.png" width="800" alt="skychat-ai screenshot" />
 </p>
 
 ## 特性
 
 - **多渠道支持** — 微信、Discord、WhatsApp 三合一，统一管理
-- **一条命令启动** — `npx wechat-ai`，扫码即用，零配置门槛
+- **一条命令启动** — `npx skychat-ai`，扫码即用，零配置门槛
 - **8+ 内置模型** — Claude、GPT、Gemini、Qwen、DeepSeek、MiniMax、GLM，一键切换
 - **300+ 第三方模型** — 通过 OpenRouter 接入，`/model vendor/model` 随时切换
 - **微信官方协议** — 基于 iLink Bot API（`ilinkai.weixin.qq.com`），非逆向、非第三方
@@ -32,26 +32,26 @@
 ### 1. 安装
 
 ```bash
-npm i -g wechat-ai
+npm i -g skychat-ai
 ```
 
 ### 2. 设置 API Key（任选一个模型）
 
 ```bash
 # macOS / Linux
-wechat-ai set qwen sk-xxx        # 通义千问
-wechat-ai set deepseek sk-xxx    # DeepSeek
-wechat-ai set gemini AIza-xxx    # Gemini
+skychat-ai set qwen sk-xxx        # 通义千问
+skychat-ai set deepseek sk-xxx    # DeepSeek
+skychat-ai set gemini AIza-xxx    # Gemini
 
 # Windows（Key 需要加引号，避免特殊字符被 cmd 解析）
-wechat-ai set qwen "sk-xxx"
-wechat-ai set deepseek "sk-xxx"
+skychat-ai set qwen "sk-xxx"
+skychat-ai set deepseek "sk-xxx"
 ```
 
 ### 3. 启动
 
 ```bash
-wechat-ai                        # 首次启动会弹出微信扫码
+skychat-ai                        # 首次启动会弹出微信扫码
 ```
 
 扫码登录后，给微信机器人发消息即可开始对话。
@@ -60,41 +60,41 @@ wechat-ai                        # 首次启动会弹出微信扫码
 
 ```bash
 # 免安装体验
-npx wechat-ai
+npx skychat-ai
 
 # 从源码运行
-git clone https://github.com/anxiong2025/wechat-ai.git
-cd wechat-ai && npm install && npm run build && node dist/cli.js
+git clone https://github.com/claudeskydream-hash/skychat-ai.git
+cd skychat-ai && npm install && npm run build && node dist/cli.js
 ```
 
 ## 命令
 
 ```bash
-wechat-ai                        # 启动（首次自动弹出二维码）
-wechat-ai set <模型> <key>        # 保存 API Key
-wechat-ai use <模型>              # 设置默认模型
-wechat-ai config                 # 查看配置（Key 已脱敏）
-wechat-ai logout                 # 退出所有渠道登录
-wechat-ai logout <渠道>           # 退出指定渠道（weixin / whatsapp）
-wechat-ai start                  # 后台运行（daemon 模式）
-wechat-ai stop                   # 停止后台进程
-wechat-ai logs                   # 查看后台日志
-wechat-ai update                 # 更新到最新版
+skychat-ai                        # 启动（首次自动弹出二维码）
+skychat-ai set <模型> <key>        # 保存 API Key
+skychat-ai use <模型>              # 设置默认模型
+skychat-ai config                 # 查看配置（Key 已脱敏）
+skychat-ai logout                 # 退出所有渠道登录
+skychat-ai logout <渠道>           # 退出指定渠道（weixin / whatsapp）
+skychat-ai start                  # 后台运行（daemon 模式）
+skychat-ai stop                   # 停止后台进程
+skychat-ai logs                   # 查看后台日志
+skychat-ai update                 # 更新到最新版
 ```
 
 ## 支持模型
 
 | 模型 | 默认版本 | 设置 Key | 获取 Key |
 |------|---------|---------|---------|
-| 通义千问 (Qwen) | qwen-plus | `wechat-ai set qwen <key>` | [申请](https://bailian.console.aliyun.com/cn-beijing/?tab=model#/api-key) |
-| DeepSeek | deepseek-chat | `wechat-ai set deepseek <key>` | [申请](https://platform.deepseek.com/api_keys) |
-| Claude | claude-opus-4-6 (Agent) | `wechat-ai set claude <key>` | [申请](https://console.anthropic.com/settings/keys) |
-| GPT | gpt-4o | `wechat-ai set gpt <key>` | [申请](https://platform.openai.com/api-keys) |
-| Gemini | gemini-2.0-flash | `wechat-ai set gemini <key>` | [申请](https://aistudio.google.com/apikey) |
-| MiniMax | MiniMax-Text-01 | `wechat-ai set minimax <key>` | [申请](https://platform.minimaxi.com/user-center/basic-information/interface-key) |
-| 智谱 (GLM) | glm-4-plus | `wechat-ai set glm <key>` | [申请](https://open.bigmodel.cn/usercenter/apikeys) |
-| Kimi (Moonshot) | moonshot-v1-8k | `wechat-ai set kimi <key>` | [申请](https://platform.moonshot.cn/console/api-keys) |
-| OpenRouter | 300+ 第三方模型 | `wechat-ai set openrouter <key>` | [申请](https://openrouter.ai/settings/keys) |
+| 通义千问 (Qwen) | qwen-plus | `skychat-ai set qwen <key>` | [申请](https://bailian.console.aliyun.com/cn-beijing/?tab=model#/api-key) |
+| DeepSeek | deepseek-chat | `skychat-ai set deepseek <key>` | [申请](https://platform.deepseek.com/api_keys) |
+| Claude | claude-opus-4-6 (Agent) | `skychat-ai set claude <key>` | [申请](https://console.anthropic.com/settings/keys) |
+| GPT | gpt-4o | `skychat-ai set gpt <key>` | [申请](https://platform.openai.com/api-keys) |
+| Gemini | gemini-2.0-flash | `skychat-ai set gemini <key>` | [申请](https://aistudio.google.com/apikey) |
+| MiniMax | MiniMax-Text-01 | `skychat-ai set minimax <key>` | [申请](https://platform.minimaxi.com/user-center/basic-information/interface-key) |
+| 智谱 (GLM) | glm-4-plus | `skychat-ai set glm <key>` | [申请](https://open.bigmodel.cn/usercenter/apikeys) |
+| Kimi (Moonshot) | moonshot-v1-8k | `skychat-ai set kimi <key>` | [申请](https://platform.moonshot.cn/console/api-keys) |
+| OpenRouter | 300+ 第三方模型 | `skychat-ai set openrouter <key>` | [申请](https://openrouter.ai/settings/keys) |
 
 支持任何 OpenAI 兼容 API，编辑 `~/.wai/config.json` 即可添加。
 
@@ -105,7 +105,7 @@ wechat-ai update                 # 更新到最新版
 配置一个 [OpenRouter](https://openrouter.ai) Key 即可使用 300+ 模型，无需逐个申请：
 
 ```bash
-wechat-ai set openrouter sk-or-xxx
+skychat-ai set openrouter sk-or-xxx
 ```
 
 在微信中通过 `/model vendor/model` 切换：
@@ -173,7 +173,7 @@ Bot Token 在 [Discord Developer Portal](https://discord.com/developers/applicat
 }
 ```
 
-首次启动会弹出二维码，用 WhatsApp 扫码绑定。如需重新绑定：`wechat-ai logout whatsapp`。
+首次启动会弹出二维码，用 WhatsApp 扫码绑定。如需重新绑定：`skychat-ai logout whatsapp`。
 
 ### Webhook（HTTP 消息推送）
 
@@ -268,7 +268,7 @@ curl -X POST http://localhost:4800 \
   └── WhatsApp (Baileys)
   │
   ▼
-wechat-ai 网关
+skychat-ai 网关
   ├── 统一登录管理（多渠道扫码/Token）
   ├── 会话管理（per-user 独立上下文）
   ├── 消息聚合（防抖合并连续消息）
@@ -318,14 +318,14 @@ src/
 
 ## 作为库使用
 
-wechat-ai 同时导出为 npm 库，可嵌入你自己的项目：
+skychat-ai 同时导出为 npm 库，可嵌入你自己的项目：
 
 ```bash
-npm install wechat-ai
+npm install skychat-ai
 ```
 
 ```typescript
-import { Gateway } from "wechat-ai";
+import { Gateway } from "skychat-ai";
 
 const gw = new Gateway(config);
 gw.use(async (ctx, next) => {
