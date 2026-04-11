@@ -82,18 +82,24 @@ function printBanner(defaultProvider: string): void {
     return `  ${b}│${c.reset}${" ".repeat(left)}${s}${" ".repeat(right)}${b}│${c.reset}`;
   };
   // Title embedded in top border, centered
-  const titleText = ` Wechat AI v${VERSION} `;
+  const titleText = ` SkyChat AI v${VERSION} `;
   const titleLen = titleText.length;
   const sideL = Math.floor((inner - titleLen) / 2);
   const sideR = inner - titleLen - sideL;
   const topBorder = `  ${b}╭${"─".repeat(sideL)}${c.reset}${c.bold}${c.white}${titleText}${c.reset}${b}${"─".repeat(sideR)}╮${c.reset}`;
 
-  // Icons: Penguin (green) <==> Capybara (orange)
+  // Icons: Cloud holding a holy sword
   const icons = [
-    `${c.green}  /\\${c.reset}              ${c.orange}\\^^^/${c.reset}`,
-    `${c.green} (oo)${c.reset}    ${c.dim}<==>${c.reset}    ${c.orange}n   n${c.reset}`,
-    `${c.green}(/  \\)${c.reset}            ${c.orange}( Oo )${c.reset}`,
-    `${c.green} ^  ^${c.reset}             ${c.orange}'----'${c.reset}`,
+    `${c.orange}       /\\${c.reset}`,
+    `${c.white}   _.${c.reset}${c.dim}.'${c.reset}${c.orange}\\  /${c.reset}${c.dim}'.${c.reset}${c.white}._${c.reset}`,
+    `${c.white} .'    ${c.orange}|  |${c.white}    '.${c.reset}`,
+    `${c.white}/  @   ${c.orange}|::|${c.white}   @ \\${c.reset}`,
+    `${c.white}| ~~~  ${c.orange}|::|${c.white}  ~~~ |${c.reset}`,
+    `${c.white} \\____${c.orange}|  |${c.white}____/${c.reset}`,
+    `${c.white}    ${c.dim}\\_${c.orange}+--${c.white}+_/${c.dim}/${c.reset}`,
+    `${c.dim}      |  |${c.reset}`,
+    `${c.dim}     _|  |_${c.reset}`,
+    `${c.dim}    /______\\${c.reset}`,
   ];
 
   const welcome = `${c.bold}${c.white}Welcome!${c.reset}`;
