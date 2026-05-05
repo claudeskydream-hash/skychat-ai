@@ -23,14 +23,14 @@
 """
 
 import argparse
+import http.client
 import io
 import json
 import os
 import sys
-import urllib.request
-import urllib.error
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse
 
 # 修复 Windows 控制台编码问题
 if sys.platform == "win32":
@@ -316,45 +316,43 @@ def build_message(github_repos: list, weibo: list, zhihu: list, ithome: list,
 # ============================================================
 
 def send_message(config: dict, text: str) -> bool:
-    """通过 skychat-ai Webhook API 发送消息"""
+    """通过 skychat-ai Webhook API 发送消息（使用 http.client 兼容性更好）"""
     webhook_url = config["webhook_url"].rstrip("/")
-    payload = {
+    parsed = urlparse(webhook_url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 4800
+
+    payload = json.dumps({
         "channel": config["channel"],
         "targetId": config["target_id"],
         "text": text,
-    }
+    }, ensure_ascii=False)
 
-    headers = {
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json; charset=utf-8"}
     if config["secret"]:
         headers["Authorization"] = f"Bearer {config['secret']}"
 
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        webhook_url,
-        data=data,
-        headers=headers,
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("POST", parsed.path or "/", body=payload.encode("utf-8"), headers=headers)
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        conn.close()
+
+        if resp.status == 200:
+            result = json.loads(body)
             if result.get("ok"):
                 print("[成功] 消息已推送")
                 return True
             else:
                 print(f"[失败] 服务器返回: {result}")
                 return False
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        print(f"[失败] HTTP {e.code}: {body}")
-        return False
-    except urllib.error.URLError as e:
-        print(f"[失败] 连接失败: {e.reason}")
+        else:
+            print(f"[失败] HTTP {resp.status}: {body}")
+            return False
+    except ConnectionRefusedError:
+        print(f"[失败] 连接被拒绝 ({host}:{port})")
         print(f"  请确认 skychat-ai 已启动且 Webhook 已开启")
-        print(f"  Webhook 地址: {webhook_url}")
         return False
     except Exception as e:
         print(f"[失败] 异常: {e}")
