@@ -27,6 +27,7 @@ const HELP = `
     skychat-ai set <provider> <key>   设置模型 API Key
     skychat-ai use <provider>         设置默认模型
     skychat-ai config                 查看当前配置
+    skychat-ai send <文件> [选项]      发送媒体文件到微信
     skychat-ai update                 更新到最新版
     skychat-ai help                   显示帮助
 
@@ -40,6 +41,13 @@ const HELP = `
   \x1b[1m设置默认模型:\x1b[0m
     skychat-ai use qwen               默认使用 Qwen
     skychat-ai use deepseek           默认使用 DeepSeek
+
+  \x1b[1m发送文件:\x1b[0m
+    skychat-ai send video.mp4        发送视频 (自动检测类型)
+    skychat-ai send song.mp3         发送音乐/语音
+    skychat-ai send photo.jpg        发送图片
+    skychat-ai send report.pdf       发送文件
+    skychat-ai send --all --dir ~/下载  批量发送目录下所有媒体
 
   \x1b[1m微信指令:\x1b[0m
     /model                           查看当前模型
@@ -413,6 +421,119 @@ async function main() {
         }
       }
       console.log(JSON.stringify(display, null, 2));
+      break;
+    }
+
+    case "send": {
+      const { sendMedia, sendAllMedia, getDefaultTargetUser, getKnownUsers, detectMediaType } = await import("./send-media.js");
+
+      // 解析参数
+      const sendArgs = args.slice(1);
+      let filePath: string | undefined;
+      let toUserId: string | undefined;
+      let forceType: string | undefined;
+      let sendAll = false;
+      let dirPath: string | undefined;
+      let caption: string | undefined;
+
+      for (let i = 0; i < sendArgs.length; i++) {
+        const arg = sendArgs[i];
+        if (arg === "--to" && sendArgs[i + 1]) {
+          toUserId = sendArgs[++i];
+        } else if (arg === "--type" && sendArgs[i + 1]) {
+          forceType = sendArgs[++i];
+        } else if (arg === "--all") {
+          sendAll = true;
+        } else if (arg === "--dir" && sendArgs[i + 1]) {
+          dirPath = sendArgs[++i];
+        } else if (arg === "--caption" && sendArgs[i + 1]) {
+          caption = sendArgs[++i];
+        } else if (arg && !arg.startsWith("--")) {
+          filePath = arg;
+        }
+      }
+
+      // 确定目标用户
+      if (!toUserId) {
+        const defaultUser = getDefaultTargetUser();
+        if (defaultUser) {
+          toUserId = defaultUser;
+        } else {
+          const users = getKnownUsers();
+          if (users.length === 0) {
+            console.error("\x1b[31m✗\x1b[0m 未找到联系人，请使用 --to <用户ID> 指定接收者");
+            process.exit(1);
+          } else {
+            console.error(`\x1b[33m⚠\x1b[0m 检测到 ${users.length} 个联系人，请使用 --to 指定:`);
+            for (const u of users) {
+              const masked = u.length > 6 ? u.slice(0, 4) + "****" + u.slice(-3) : u;
+              console.error(`    ${masked}`);
+            }
+            process.exit(1);
+          }
+        }
+      }
+
+      const targetLabel = toUserId.length > 6 ? toUserId.slice(0, 4) + "****" + toUserId.slice(-3) : toUserId;
+
+      if (sendAll) {
+        // 批量发送模式
+        const targetDir = dirPath || filePath || ".";
+        console.log(`\x1b[1m发送目录下所有媒体文件\x1b[0m → ${targetLabel}`);
+        console.log(`  目录: ${targetDir}`);
+        if (forceType) console.log(`  类型过滤: ${forceType}`);
+        console.log();
+
+        const results = await sendAllMedia(targetDir, toUserId, {
+          typeFilter: (forceType as "image" | "video" | "voice" | "file" | "auto" | undefined) ?? "auto",
+          caption,
+          onProgress: (msg) => console.log(msg),
+        });
+        process.exit(results.every(r => r.success) ? 0 : 1);
+      } else {
+        // 单文件发送
+        if (!filePath) {
+          console.error("\x1b[31m✗\x1b[0m 请指定文件路径");
+          console.error("用法: skychat-ai send <文件路径> [--to <用户ID>] [--type <类型>]");
+          process.exit(1);
+        }
+
+        // 解析为绝对路径
+        const { resolve } = await import("node:path");
+        filePath = resolve(filePath);
+
+        const typeLabel = (() => {
+          const t = forceType && forceType !== "auto" ? forceType : undefined;
+          if (t) return t;
+          const mt = detectMediaType(filePath);
+          switch (mt) {
+            case 1: return "图片";
+            case 2: return "视频";
+            case 3: return "文件";
+            case 4: return "语音";
+            default: return "文件";
+          }
+        })();
+
+        console.log(`\x1b[1m发送${typeLabel}\x1b[0m → ${targetLabel}`);
+        console.log(`  文件: ${filePath}`);
+        console.log();
+
+        const result = await sendMedia({
+          filePath,
+          toUserId,
+          mediaType: (forceType as "auto" | "image" | "video" | "voice" | "file" | undefined) ?? "auto",
+          caption,
+          onProgress: (msg) => console.log(`  ${msg}`),
+        });
+
+        if (result.success) {
+          console.log(`\n\x1b[32m✓\x1b[0m ${result.mediaType}已发送 (${(result.fileSize / 1024 / 1024).toFixed(2)} MB)`);
+        } else {
+          console.error(`\n\x1b[31m✗\x1b[0m 发送失败: ${result.error}`);
+          process.exit(1);
+        }
+      }
       break;
     }
 

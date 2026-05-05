@@ -8,6 +8,8 @@ export { TelegramChannel } from "./channels/telegram.js";
 export { ClaudeAgentProvider } from "./providers/claude-agent.js";
 export { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 export { McpManager } from "./mcp.js";
+export { sendMedia, sendAllMedia, detectMediaType } from "./send-media.js";
+export type { SendMediaOptions, SendMediaResult } from "./send-media.js";
 export type {
   Channel,
   Provider,
