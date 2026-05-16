@@ -10,6 +10,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomBytes, randomUUID, createHash, createCipheriv } from "node:crypto";
 import { getAccountsDir } from "./config.js";
+import { encodeToSilk, type SilkAudio } from "./voice-encode.js";
 
 // ── 常量 ──
 
@@ -247,6 +248,7 @@ async function sendMediaMessage(
   mediaType: number,
   fileName: string,
   caption?: string,
+  voiceDurationMs?: number,
 ): Promise<void> {
   // 先发送文字说明
   if (caption?.trim()) {
@@ -295,7 +297,8 @@ async function sendMediaMessage(
       };
       break;
     case UploadMediaType.VOICE: {
-      const playtime = Math.round((uploadResult.fileSize * 8) / 16000 * 1000);
+      // 时长以 silk 编码器返回为准；缺省时按 silk_v3 24kHz ≈ 25kbps 粗估
+      const playtime = voiceDurationMs ?? Math.round((uploadResult.fileSize * 8) / 25000 * 1000);
       item = {
         type: MessageItemType.VOICE,
         voice_item: {
@@ -304,7 +307,7 @@ async function sendMediaMessage(
             aes_key: aesKeyBase64,
             encrypt_type: 1,
           },
-          encode_type: 7, // mp3
+          encode_type: 4, // silk_v3
           playtime,
         },
       };
@@ -376,42 +379,80 @@ export async function sendMedia(options: SendMediaOptions): Promise<SendMediaRes
     const stat = await import("node:fs/promises").then(m => m.stat(filePath));
     const fileSize = stat.size;
     onProgress?.(`读取文件 (${(fileSize / 1024 / 1024).toFixed(2)} MB)...`);
-    const buffer = await readFile(filePath);
+    const originalBuffer = await readFile(filePath);
+    let buffer = originalBuffer;
 
     if (fileSize > 25 * 1024 * 1024) {
       onProgress?.(`⚠️ 文件较大 (${(fileSize / 1024 / 1024).toFixed(1)} MB)，上传可能需要一些时间...`);
     }
 
-    // 生成密钥
-    const rawsize = buffer.length;
-    const rawfilemd5 = createHash("md5").update(buffer).digest("hex");
-    const filesize = aesEcbPaddedSize(rawsize);
-    const filekey = randomBytes(16).toString("hex");
-    const aeskey = randomBytes(16);
+    // 语音：先转 SILK_V3（微信 CDN 拒收 mp3/wav/aac 等非 silk 格式）
+    let voiceDurationMs: number | undefined;
+    if (mediaType === UploadMediaType.VOICE) {
+      onProgress?.("转码为 SILK_V3...");
+      const silk: SilkAudio | null = await encodeToSilk(buffer);
+      if (!silk) {
+        return {
+          success: false, filePath, mediaType: "语音", fileSize: 0,
+          error: "SILK 转码失败（请确认已安装 ffmpeg 并加入 PATH）",
+        };
+      }
+      buffer = silk.data;
+      voiceDurationMs = silk.duration;
+      onProgress?.(`SILK 编码完成 (${(buffer.length / 1024).toFixed(1)} KB, ${(silk.duration / 1000).toFixed(1)}s)`);
+    }
 
-    // 获取上传地址
-    onProgress?.("获取上传地址...");
-    const uploadUrlResp = await getUploadUrl(account, {
-      filekey, mediaType, toUserId, rawsize, rawfilemd5, filesize,
-      aeskey: aeskey.toString("hex"),
-    });
+    // 单次"上传 + 发消息"流程
+    const uploadAndSend = async (
+      payload: Buffer,
+      mt: number,
+      durMs: number | undefined,
+    ): Promise<number> => {
+      const rawsize = payload.length;
+      const rawfilemd5 = createHash("md5").update(payload).digest("hex");
+      const filesize = aesEcbPaddedSize(rawsize);
+      const filekey = randomBytes(16).toString("hex");
+      const aeskey = randomBytes(16);
 
-    // 上传到 CDN
-    onProgress?.(`上传到 CDN (${(filesize / 1024 / 1024).toFixed(2)} MB)...`);
-    const downloadParam = await uploadBufferToCdn(
-      buffer, uploadUrlResp.upload_full_url, uploadUrlResp.upload_param,
-      filekey, aeskey, mediaTypeLabel(mediaType),
-    );
+      onProgress?.("获取上传地址...");
+      const uploadUrlResp = await getUploadUrl(account, {
+        filekey, mediaType: mt, toUserId, rawsize, rawfilemd5, filesize,
+        aeskey: aeskey.toString("hex"),
+      });
 
-    // 发送消息
-    onProgress?.("发送消息...");
-    await sendMediaMessage(account, toUserId, {
-      filekey, downloadParam, aeskey, fileSize: rawsize, fileSizeCiphertext: filesize,
-    }, mediaType, basename(filePath), caption);
+      onProgress?.(`上传到 CDN (${(filesize / 1024 / 1024).toFixed(2)} MB)...`);
+      const downloadParam = await uploadBufferToCdn(
+        payload, uploadUrlResp.upload_full_url, uploadUrlResp.upload_param,
+        filekey, aeskey, mediaTypeLabel(mt),
+      );
 
-    onProgress?.(`✓ ${mediaTypeLabel(mediaType)}已发送 → ${maskId(toUserId)} (${(rawsize / 1024 / 1024).toFixed(2)} MB)`);
+      onProgress?.("发送消息...");
+      await sendMediaMessage(account, toUserId, {
+        filekey, downloadParam, aeskey, fileSize: rawsize, fileSizeCiphertext: filesize,
+      }, mt, basename(filePath), caption, durMs);
 
-    return { success: true, filePath, mediaType: mediaTypeLabel(mediaType), fileSize: rawsize };
+      return rawsize;
+    };
+
+    let finalMediaType = mediaType;
+    let sentBytes: number;
+    try {
+      sentBytes = await uploadAndSend(buffer, mediaType, voiceDurationMs);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // 微信 Bot 平台禁止 bot 发语音（CDN 永远返回 -5102019），降级为文件发送
+      const isVoiceBlocked = mediaType === UploadMediaType.VOICE
+        && /-5102019|CDN 上传失败 500/.test(msg);
+      if (!isVoiceBlocked) throw err;
+
+      onProgress?.("⚠️ 微信 Bot 平台拒收语音 (-5102019)，自动降级为文件发送...");
+      finalMediaType = UploadMediaType.FILE;
+      sentBytes = await uploadAndSend(originalBuffer, UploadMediaType.FILE, undefined);
+    }
+
+    onProgress?.(`✓ ${mediaTypeLabel(finalMediaType)}已发送 → ${maskId(toUserId)} (${(sentBytes / 1024 / 1024).toFixed(2)} MB)`);
+
+    return { success: true, filePath, mediaType: mediaTypeLabel(finalMediaType), fileSize: sentBytes };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     return { success: false, filePath, mediaType: mediaTypeLabel(detectMediaType(filePath)), fileSize: 0, error: errorMsg };

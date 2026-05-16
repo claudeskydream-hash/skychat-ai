@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, randomUUID, createDecipheriv, createCipheriv } from "node:crypto";
 import { createHash } from "node:crypto";
 import type { Channel, InboundMessage, OutboundMessage, ChannelConfig, MediaAttachment } from "../types.js";
+import { encodeToSilk } from "../voice-encode.js";
 
 const log = createLogger("weixin");
 
@@ -523,9 +524,16 @@ export class WeixinChannel implements Channel {
     if (!this.account) return false;
 
     try {
-      const uploaded = await this.uploadToWeixin(audio, targetId, UploadMediaType.VOICE);
+      // 微信 CDN 语音通道只接收 SILK_V3，先转码
+      const silk = await encodeToSilk(audio);
+      if (!silk) {
+        log.warn("SILK 转码失败（缺少 ffmpeg？），跳过语音发送");
+        return false;
+      }
 
-      const playtime = estimatePlaytime(audio.length);
+      const uploaded = await this.uploadToWeixin(silk.data, targetId, UploadMediaType.VOICE);
+
+      const playtime = silk.duration;
       const body = {
         msg: {
           from_user_id: "",
@@ -542,7 +550,7 @@ export class WeixinChannel implements Channel {
                 aes_key: Buffer.from(uploaded.aeskey).toString("base64"),
                 encrypt_type: 1,
               },
-              encode_type: 7, // mp3
+              encode_type: 4, // silk_v3
               playtime,
             },
           }],
@@ -1358,11 +1366,6 @@ function generateClientId(): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-/** Estimate voice playtime in ms from mp3 buffer size (rough: ~16kbps) */
-function estimatePlaytime(byteSize: number): number {
-  return Math.round((byteSize * 8) / 16000 * 1000);
 }
 
 function detectImageType(buf: Buffer): string {
