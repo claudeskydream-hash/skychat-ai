@@ -32,6 +32,12 @@ export class ClaudeAgentProvider implements Provider {
       process.env.ANTHROPIC_API_KEY = sanitizeKey(rawKey);
     }
 
+    // Support custom base URL (e.g. GLM Anthropic-compatible endpoint)
+    const baseUrl = this.config.baseUrl as string | undefined;
+    if (baseUrl) {
+      process.env.ANTHROPIC_BASE_URL = baseUrl;
+    }
+
     const allowedTools = options?.allowedTools
       || (this.config.allowedTools as string[])
       || DEFAULT_TOOLS;

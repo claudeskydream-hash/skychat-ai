@@ -12,7 +12,22 @@ const DEFAULT_CONFIG: WaiConfig = {
   providers: {
     claude: {
       type: "claude-agent",
-      allowedTools: ["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"],
+      allowedTools: [
+        "Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch",
+        "mcp__chrome-mcp-server__get_windows_and_tabs",
+        "mcp__chrome-mcp-server__chrome_navigate",
+        "mcp__chrome-mcp-server__chrome_javascript",
+        "mcp__chrome-mcp-server__chrome_click_element",
+        "mcp__chrome-mcp-server__chrome_screenshot",
+        "mcp__chrome-mcp-server__chrome_upload_file",
+        "mcp__chrome-mcp-server__chrome_handle_dialog",
+        "mcp__chrome-mcp-server__chrome_read_page",
+        "mcp__chrome-mcp-server__chrome_fill_or_select",
+        "mcp__chrome-mcp-server__chrome_keyboard",
+        "mcp__chrome-mcp-server__chrome_switch_tab",
+        "mcp__chrome-mcp-server__chrome_close_tabs",
+        "mcp__chrome-mcp-server__chrome_get_web_content",
+      ],
     },
     qwen: {
       type: "claw-agent",
