@@ -27,6 +27,7 @@ const HELP = `
     skychat-ai set <provider> <key>   设置模型 API Key
     skychat-ai use <provider>         设置默认模型
     skychat-ai config                 查看当前配置
+    skychat-ai send-text <文字> [选项]  发送文字消息到微信
     skychat-ai send <文件> [选项]      发送媒体文件到微信
     skychat-ai update                 更新到最新版
     skychat-ai help                   显示帮助
@@ -421,6 +422,63 @@ async function main() {
         }
       }
       console.log(JSON.stringify(display, null, 2));
+      break;
+    }
+
+    case "send-text": {
+      const { sendText, getDefaultTargetUser, getKnownUsers } = await import("./send-media.js");
+
+      const sendArgs = args.slice(1);
+      let text: string | undefined;
+      let toUserId: string | undefined;
+
+      for (let i = 0; i < sendArgs.length; i++) {
+        const arg = sendArgs[i];
+        if (arg === "--to" && sendArgs[i + 1]) {
+          toUserId = sendArgs[++i];
+        } else if (arg && !arg.startsWith("--")) {
+          text = arg;
+        }
+      }
+
+      if (!text) {
+        console.error("\x1b[31m✗\x1b[0m 请指定文字内容");
+        console.error("用法: skychat-ai send-text <文字> [--to <用户ID>]");
+        process.exit(1);
+      }
+
+      if (!toUserId) {
+        const defaultUser = getDefaultTargetUser();
+        if (defaultUser) {
+          toUserId = defaultUser;
+        } else {
+          const users = getKnownUsers();
+          if (users.length === 0) {
+            console.error("\x1b[31m✗\x1b[0m 未找到联系人，请使用 --to <用户ID> 指定接收者");
+            process.exit(1);
+          } else {
+            console.error(`\x1b[33m⚠\x1b[0m 检测到 ${users.length} 个联系人，请使用 --to 指定:`);
+            for (const u of users) {
+              const masked = u.length > 6 ? u.slice(0, 4) + "****" + u.slice(-3) : u;
+              console.error(`    ${masked}`);
+            }
+            process.exit(1);
+          }
+        }
+      }
+
+      const targetLabel = toUserId.length > 6 ? toUserId.slice(0, 4) + "****" + toUserId.slice(-3) : toUserId;
+      console.log(`\x1b[1m发送文字\x1b[0m → ${targetLabel}`);
+      console.log(`  内容: ${text.slice(0, 80)}${text.length > 80 ? "..." : ""}`);
+      console.log();
+
+      const result = await sendText({ text, toUserId });
+      if (result.success) {
+        console.log(`\x1b[32m✓\x1b[0m 文字已发送`);
+      } else {
+        console.error(`\x1b[31m✗\x1b[0m 发送失败: ${result.error}`);
+        process.exit(1);
+      }
       break;
     }
 

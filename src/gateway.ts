@@ -874,6 +874,7 @@ export class Gateway {
             "/画 <描述> - AI生成图片",
             "/help - 显示帮助",
             "/ping - 检查状态",
+            "/id - 查看我的用户ID",
             "",
             "快捷切换模型:",
             "/cc → Claude  /qwen /deepseek /gpt 等",
@@ -934,6 +935,16 @@ export class Gateway {
         await channel.send({
           targetId: msg.senderId,
           text: `pong (${Date.now() - msg.timestamp}ms)`,
+          replyToken: msg.replyToken,
+        });
+        break;
+      }
+
+      case "/id":
+      case "/myid": {
+        await channel.send({
+          targetId: msg.senderId,
+          text: `你的用户 ID:\n${msg.senderId}`,
           replyToken: msg.replyToken,
         });
         break;

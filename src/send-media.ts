@@ -418,6 +418,49 @@ export async function sendMedia(options: SendMediaOptions): Promise<SendMediaRes
   }
 }
 
+// ── 发送纯文字 ──
+
+export interface SendTextOptions {
+  /** 要发送的文字内容 */
+  text: string;
+  /** 目标微信用户 ID */
+  toUserId: string;
+}
+
+export interface SendTextResult {
+  success: boolean;
+  error?: string;
+}
+
+/** 发送纯文字消息到微信 */
+export async function sendText(options: SendTextOptions): Promise<SendTextResult> {
+  const { text, toUserId } = options;
+
+  try {
+    const account = loadWeixinAccount();
+
+    const res = await weixinApi(account, "ilink/bot/sendmessage", {
+      msg: {
+        from_user_id: "",
+        to_user_id: toUserId,
+        client_id: generateClientId(),
+        message_type: 2,
+        message_state: 2,
+        item_list: [{ type: MessageItemType.TEXT, text_item: { text: text.trim() } }],
+      },
+      base_info: { channel_version: CHANNEL_VERSION },
+    }, { timeout: API_TIMEOUT_MS });
+
+    if (res.ret && res.ret !== 0) {
+      return { success: false, error: `发送失败: ${res.errmsg || JSON.stringify(res)}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** 批量发送目录下的媒体文件 */
 export async function sendAllMedia(
   dirPath: string,
