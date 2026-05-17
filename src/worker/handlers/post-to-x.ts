@@ -22,6 +22,20 @@ window.__xPost = {
 };
 `;
 
+/**
+ * 处理发推任务 — 通过 Chrome MCP 模拟真人在 X/Twitter 网页端发布推文。
+ *
+ * 完整流程为 7 步状态机:
+ *   1. 打开编辑框（导航到 x.com/compose/post）
+ *   2. 写入推文正文
+ *   3. 点击媒体按钮（仅含图片/视频时）
+ *   4. 上传媒体文件并等待上传完成
+ *   5. 等待发帖按钮变为可用
+ *   6. 点击发帖按钮
+ *   7. 确认发布成功（URL 已离开 /compose）
+ *
+ * 每一步都有超时检测和 FAIL 回退，任何步骤失败都返回结构化错误。
+ */
 export async function handlePostTweet(
   task: WorkerTask,
   ctx: WorkerCtx,
@@ -119,6 +133,9 @@ export async function handlePostTweet(
     }
   }
 
+  // 导航完成后等待页面稳定，避免后续操作过早执行
+  await new Promise(r => setTimeout(r, 1500));
+
   // Re-init state machine after navigation (page reloads, __xPost is lost)
   const step1Result = await mcp.callTool("chrome_javascript", {
     tabId,
@@ -144,27 +161,91 @@ export async function handlePostTweet(
   const step2Start = Date.now();
   log.info("Step 2: 写入正文");
   const encodedText = JSON.stringify(finalText);
-  const step2Result = await mcp.callTool("chrome_javascript", {
-    tabId,
-    code: `
-      const el = document.querySelector('[data-testid="tweetTextarea_0"]');
-      if (!el) return 'FAIL: textarea 消失';
-      el.focus();
-      await new Promise(r => setTimeout(r, 200));
-      document.execCommand('selectAll');
-      await new Promise(r => setTimeout(r, 100));
-      document.execCommand('delete');
-      await new Promise(r => setTimeout(r, 200));
-      const text = ${encodedText};
-      document.execCommand('insertText', false, text);
-      await new Promise(r => setTimeout(r, 500));
-      if (window.__xPost && window.__xPost.check[2]()) return window.__xPost.advance();
-      if (el.innerText.trim().length > 0) return '[step 2/7] 正文已写入 (直接确认)';
-      return 'FAIL: 正文写入后编辑框为空';
-    `,
-  });
 
-  const step2Inner = extractMcpResult(step2Result);
+  // 最多尝试 2 次：如果 textarea 不存在，重新执行 Step 1 导航后再试
+  let step2Inner = "";
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const step2Result = await mcp.callTool("chrome_javascript", {
+      tabId,
+      code: `
+        const el = document.querySelector('[data-testid="tweetTextarea_0"]');
+        if (!el) return 'FAIL: textarea 消失';
+        el.focus();
+
+        await new Promise(r => setTimeout(r, 200));
+        document.execCommand('selectAll');
+        await new Promise(r => setTimeout(r, 100));
+        document.execCommand('delete');
+        await new Promise(r => setTimeout(r, 200));
+        const text = ${encodedText};
+        document.execCommand('insertText', false, text);
+
+        // 等待 1 秒让 Twitter 处理输入，然后检查按钮是否可用
+        await new Promise(r => setTimeout(r, 1000));
+
+        // insertText 不触发 paste 事件，链接卡片不会加载，按钮可能不亮。
+        // 若按钮仍为 disabled，执行"全选→复制→删除→粘贴"触发 paste 事件。
+        const btnCheck = document.querySelector('[data-testid="tweetButton"]');
+        if (!btnCheck || btnCheck.disabled || btnCheck.getAttribute('aria-disabled') === 'true') {
+          el.focus();
+          document.execCommand('selectAll');
+          await new Promise(r => setTimeout(r, 100));
+          document.execCommand('copy');
+          await new Promise(r => setTimeout(r, 100));
+          document.execCommand('delete');
+          await new Promise(r => setTimeout(r, 200));
+          document.execCommand('paste');
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        if (window.__xPost && window.__xPost.check[2]()) return window.__xPost.advance();
+        if (el.innerText.trim().length > 0) return '[step 2/7] 正文已写入 (直接确认)';
+        return 'FAIL: 正文写入后编辑框为空';
+      `,
+    });
+
+    step2Inner = extractMcpResult(step2Result);
+
+    // textarea 消失 → 重新导航（Step 1）后重试，仅重试一次
+    if (step2Inner.startsWith("FAIL: textarea 消失") && attempt === 1) {
+      log.warn(`Step 2 textarea 不存在，重新导航后重试 (attempt 2/2)`);
+      // 重新执行 Step 1 导航
+      await mcp.callTool("chrome_javascript", {
+        tabId,
+        code: `window.onbeforeunload = null; return 'cleared';`,
+      }).catch(() => {});
+      try {
+        await mcp.callTool("chrome_navigate", { tabId, url: "https://x.com/compose/post" });
+      } catch {
+        await mcp.callTool("chrome_handle_dialog", { tabId, action: "accept" }).catch(() => {});
+        try {
+          await mcp.callTool("chrome_navigate", { tabId, url: "https://x.com/compose/post" });
+        } catch (navErr) {
+          log.error(`重试导航失败`);
+          return { ok: false, reason: "NAV_FAIL", userMessage: `❌ 导航失败: ${navErr instanceof Error ? navErr.message : navErr}` };
+        }
+      }
+      // 等待页面稳定 + 状态机初始化
+      await new Promise(r => setTimeout(r, 1500));
+      await mcp.callTool("chrome_javascript", {
+        tabId,
+        timeoutMs: 12000,
+        code: `
+          ${STATE_MACHINE_INIT}
+          for (let i = 0; i < 12; i++) {
+            await new Promise(r => setTimeout(r, 500));
+            if (window.__xPost.check[1]()) return window.__xPost.advance();
+          }
+          return 'FAIL: 编辑框未在 6s 内出现';
+        `,
+      }).catch(() => {});
+      continue; // 进入第 2 次尝试
+    }
+
+    // 非 textarea 消失的失败，或成功，直接跳出
+    break;
+  }
+
   if (step2Inner.startsWith("FAIL")) {
     log.error(`Step 2 FAIL [${mark("step2", step2Start)}ms]: ${step2Inner}`);
     return { ok: false, reason: "STEP2_FAIL", userMessage: `❌ 发推失败: ${step2Inner}` };
@@ -225,7 +306,7 @@ export async function handlePostTweet(
     // Wait up to 60s for upload completion (attachments node + tweetButton enabled)
     const step4Result = await mcp.callTool("chrome_javascript", {
       tabId,
-      timeoutMs: 65000,
+      timeoutMs: 55000,
       code: `
         for (let i = 0; i < 60; i++) {
           await new Promise(r => setTimeout(r, 1000));
@@ -259,9 +340,9 @@ export async function handlePostTweet(
   log.info("Step 5: 等待发帖按钮可用");
   const step5Result = await mcp.callTool("chrome_javascript", {
     tabId,
-    timeoutMs: 35000,
+    timeoutMs: 70000,
     code: `
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 60; i++) {
         await new Promise(r => setTimeout(r, 1000));
         const btn = document.querySelector('[data-testid="tweetButton"]');
         if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
@@ -270,7 +351,7 @@ export async function handlePostTweet(
           return '[step 5/7] 发帖按钮可用 (直接确认)';
         }
       }
-      return 'FAIL: 发帖按钮 30s 内未变为可用';
+      return 'FAIL: 发帖按钮 60s 内未变为可用';
     `,
   });
 
@@ -344,8 +425,9 @@ export async function handlePostTweet(
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * MCP tool results may be JSON-wrapped: {"success":true,"result":"FAIL: ...","metrics":{...}}
- * Extract the inner .result string so FAIL checks work correctly.
+ * 从 MCP 工具返回值中提取实际结果字符串。
+ * chrome-mcp 有时会将结果包装为 JSON: {"success":true,"result":"...","metrics":{...}}
+ * 本函数剥掉外层包装，返回 .result 字段；若不是 JSON 则原样返回。
  */
 function extractMcpResult(raw: string): string {
   try {
@@ -355,10 +437,18 @@ function extractMcpResult(raw: string): string {
   return raw;
 }
 
+/**
+ * 计算 X/Twitter 字符长度。
+ * X 使用 "weight" 计数法：基本平面字符 (U+0000~FFFF) 算 1，补充平面字符（emoji 等，> U+FFFF）算 2。
+ */
 function xLen(text: string): number {
   return [...text].reduce((n, c) => n + (c.codePointAt(0)! > 0xffff ? 2 : 1), 0);
 }
 
+/**
+ * 按 X/Twitter 字符计数规则截断文本。
+ * 超出 max 长度时从末尾逐字符删除，最后补省略号"…"。
+ */
 function xTruncate(text: string, max: number): string {
   if (xLen(text) <= max) return text;
   const chars = [...text];
@@ -366,14 +456,21 @@ function xTruncate(text: string, max: number): string {
   return chars.join("") + "…";
 }
 
+/** 从浏览器标签列表中找到 X/Twitter 标签页的 tabId，找不到返回 null */
 function findXTabId(raw: string): number | null {
   return findTabByPredicate(raw, (url: string) => url.includes("x.com") || url.includes("twitter.com"));
 }
 
+/** 返回任意一个浏览器标签的 tabId（当没有 X 标签时作为兜底） */
 function findAnyTabId(raw: string): number | null {
   return findTabByPredicate(raw, () => true);
 }
 
+/**
+ * 递归搜索 chrome-mcp 返回的标签列表 JSON，找到第一个 URL 满足 pred 条件的标签的 tabId。
+ * 兼容 chrome-mcp 的 `tabId` 字段和 chrome.tabs API 的 `id` 字段两种格式。
+ * 搜索会递归遍历数组和嵌套对象（包括窗口的 tabs 数组）。
+ */
 function findTabByPredicate(raw: string, pred: (url: string) => boolean): number | null {
   let data: unknown;
   try {
