@@ -1,16 +1,76 @@
 import type { WorkerTask, WorkerCtx, WorkerResult, PostTweetParams } from "../types.js";
 import { ensureChrome } from "../chrome.js";
 
+// 检查推文发布按钮是否可点击的 JS 代码片段，注入到浏览器中使用
+const IS_TWEET_BTN_READY = `
+function isTweetBtnReady() {
+  const btn = document.querySelector('[data-testid="tweetButton"]');
+  return btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true';
+}
+`;
+
+/** 清空编辑框内所有文本（selectAll + delete + 残留逐字删除） */
+const CLEAR_TEXTAREA = `
+async function clearTextarea() {
+  const el = document.querySelector('[data-testid="tweetTextarea_0"]');
+  if (!el) return -1;
+  el.focus();
+  await new Promise(r => setTimeout(r, 200));
+  document.execCommand('selectAll');
+  await new Promise(r => setTimeout(r, 100));
+  document.execCommand('delete');
+  await new Promise(r => setTimeout(r, 300));
+  // 残留逐字删除
+  const remaining = el.innerText.trim().length;
+  if (remaining > 0) {
+    for (let i = 0; i < remaining + 5; i++) document.execCommand('delete');
+    await new Promise(r => setTimeout(r, 200));
+  }
+  return el.innerText.trim().length;
+}
+`;
+
+/** 用 insertText 向编辑框写入文本 */
+const INPUT_TEXT = `
+async function inputText(text) {
+  const el = document.querySelector('[data-testid="tweetTextarea_0"]');
+  if (!el) return 'FAIL: textarea 消失';
+  el.focus();
+  await clearTextarea();
+  document.execCommand('insertText', false, text);
+  return el.innerText.trim().length;
+}
+`;
+
+/**
+ * 检查 X 平台字数限制指示器，返回 { overLimit, charInfo }。
+ * overLimit=true 表示超出限制，charInfo 是日志用的字数信息字符串。
+ */
+const CHECK_CHAR_LIMIT = `
+function checkCharLimit() {
+  const charCountEl = document.querySelector('[data-testid="tweetCharacterCountFill"]')
+    || document.querySelector('[data-testid="tweetCharacterCount"]');
+  const charInfo = charCountEl ? 'charCount=' + charCountEl.textContent : '';
+  const overLimit = !!document.querySelector('[data-testid="tweetCharacterCountFill"][style*="216"]')
+    || (charCountEl && parseInt(charCountEl.textContent || '0') < 0);
+  return { overLimit, charInfo };
+}
+`;
+
+/** 所有注入函数的合集，一次性注入 */
+const INJECT_ALL = IS_TWEET_BTN_READY + CLEAR_TEXTAREA + INPUT_TEXT + CHECK_CHAR_LIMIT;
+
 // Inline state machine JS — injected into browser after every chrome_navigate
 const STATE_MACHINE_INIT = `
+${INJECT_ALL}
 window.__xPost = {
   step: 0, hasMedia: false, startTime: Date.now(),
   check: {
     1: () => !!document.querySelector('[data-testid="tweetTextarea_0"]'),
     2: () => { const el = document.querySelector('[data-testid="tweetTextarea_0"]'); return el && el.innerText.trim().length > 0; },
     3: () => { const fi = document.querySelector('[data-testid="fileInput"]'); return fi && fi.offsetParent !== null; },
-    4: () => { const att = document.querySelector('[data-testid="attachments"]'); const btn = document.querySelector('[data-testid="tweetButton"]'); return !!att && !!btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true'; },
-    5: () => { const btn = document.querySelector('[data-testid="tweetButton"]'); return btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true'; },
+    4: () => { const att = document.querySelector('[data-testid="attachments"]'); return !!att && typeof isTweetBtnReady === 'function' && isTweetBtnReady(); },
+    5: () => typeof isTweetBtnReady === 'function' && isTweetBtnReady(),
     6: () => !document.location.href.includes('/compose'),
     7: () => document.location.href.includes('x.com') && !document.location.href.includes('/compose'),
   },
@@ -162,49 +222,90 @@ export async function handlePostTweet(
   log.info("Step 2: 写入正文");
   const encodedText = JSON.stringify(finalText);
 
+  log.info(`Step 2 OK [${mark("step1", step1Start)}ms]: 888886=========================`);
   // 最多尝试 2 次：如果 textarea 不存在，重新执行 Step 1 导航后再试
   let step2Inner = "";
   for (let attempt = 1; attempt <= 2; attempt++) {
     const step2Result = await mcp.callTool("chrome_javascript", {
       tabId,
       code: `
-        const el = document.querySelector('[data-testid="tweetTextarea_0"]');
-        if (!el) return 'FAIL: textarea 消失';
-        el.focus();
-
-        await new Promise(r => setTimeout(r, 200));
-        document.execCommand('selectAll');
-        await new Promise(r => setTimeout(r, 100));
-        document.execCommand('delete');
-        await new Promise(r => setTimeout(r, 200));
+        ${INJECT_ALL}
         const text = ${encodedText};
-        document.execCommand('insertText', false, text);
+        const actualLen = await inputText(text);
+        if (actualLen === -1) return 'FAIL: textarea 消失';
 
-        // 等待 1 秒让 Twitter 处理输入，然后检查按钮是否可用
         await new Promise(r => setTimeout(r, 1000));
 
-        // insertText 不触发 paste 事件，链接卡片不会加载，按钮可能不亮。
-        // 若按钮仍为 disabled，执行"全选→复制→删除→粘贴"触发 paste 事件。
-        const btnCheck = document.querySelector('[data-testid="tweetButton"]');
-        if (!btnCheck || btnCheck.disabled || btnCheck.getAttribute('aria-disabled') === 'true') {
-          el.focus();
-          document.execCommand('selectAll');
-          await new Promise(r => setTimeout(r, 100));
-          document.execCommand('copy');
-          await new Promise(r => setTimeout(r, 100));
-          document.execCommand('delete');
-          await new Promise(r => setTimeout(r, 200));
-          document.execCommand('paste');
-          await new Promise(r => setTimeout(r, 500));
+        const { overLimit, charInfo } = checkCharLimit();
+        if (overLimit) return 'FAIL: 超出X字数限制 ' + charInfo + ' actual=' + actualLen + ' expected=${finalText.length}';
+        if (actualLen !== ${finalText.length}) return 'RETRY_WITH_TYPE:len:' + actualLen + ':${finalText.length}';
+        if (isTweetBtnReady()) {
+          if (window.__xPost && window.__xPost.check[2]()) return window.__xPost.advance();
+          return '[step 2/7] 正文已写入 (直接确认)';
         }
-
-        if (window.__xPost && window.__xPost.check[2]()) return window.__xPost.advance();
-        if (el.innerText.trim().length > 0) return '[step 2/7] 正文已写入 (直接确认)';
-        return 'FAIL: 正文写入后编辑框为空';
+        return 'RETRY_WITH_TYPE';
       `,
     });
 
     step2Inner = extractMcpResult(step2Result);
+
+    // insertText 成功，直接跳出
+    if (!step2Inner.startsWith("FAIL") && !step2Inner.startsWith("RETRY_WITH_TYPE")) {
+      break;
+    }
+
+    // insertText 失败或字数不匹配 → 降级：用 chrome_computer type 模拟真人键盘逐字输入
+    if (step2Inner === "RETRY_WITH_TYPE" || step2Inner.startsWith("RETRY_WITH_TYPE:")) {
+      if (step2Inner.includes("len:")) {
+        log.warn(`Step 2 字数不匹配: ${step2Inner}`);
+      }
+      log.info(`Step 2 insertText 未生效，降级为 chrome_computer type 模拟键盘输入`);
+
+      // 先清空编辑框
+      const clearRes = await mcp.callTool("chrome_javascript", {
+        tabId,
+        code: `${INJECT_ALL} const remain = await clearTextarea(); return remain === -1 ? 'FAIL: textarea 消失' : 'CLEARED:len=' + remain;`,
+      });
+      log.info(`清空编辑框: ${extractMcpResult(clearRes)}`);
+
+      // 用 chrome_computer type 模拟真人键盘输入
+      const typeResult = await mcp.callTool("chrome_computer", {
+        tabId,
+        action: "type",
+        text: finalText,
+      }).catch((err) => `FAIL: chrome_computer type 失败: ${err instanceof Error ? err.message : err}`);
+
+      const typeInner = typeof typeResult === "string" ? typeResult : extractMcpResult(String(typeResult));
+      log.info(`chrome_computer type 完成: ${typeInner.slice(0, 100)}`);
+
+      // 等待 Twitter 处理输入
+      await new Promise(r => setTimeout(r, 1500));
+
+      // 验证输入是否成功
+      const verifyResult = await mcp.callTool("chrome_javascript", {
+        tabId,
+        code: `
+          ${INJECT_ALL}
+          const el = document.querySelector('[data-testid="tweetTextarea_0"]');
+          if (!el) return 'FAIL: textarea 消失';
+          const actual = el.innerText.trim();
+          const expected = ${finalText.length};
+          const btnReady = isTweetBtnReady();
+          const { overLimit, charInfo } = checkCharLimit();
+
+          if (overLimit) return 'FAIL: 超出X字数限制 ' + charInfo + ' actual=' + actual.length + ' expected=' + expected;
+          if (actual.length > 0 && actual.length !== expected) return 'FAIL: 字数不匹配 actual=' + actual.length + ' expected=' + expected + ' ' + charInfo;
+          if (actual.length === 0 && !btnReady) return 'FAIL: 键盘模拟输入后编辑框为空且按钮不可用 ' + charInfo;
+
+          if (window.__xPost && window.__xPost.check[2]()) return window.__xPost.advance();
+          const label = actual.length > 0 ? actual.length + '字' : 'innerText为空但按钮可用';
+          return '[step 2/7] 正文已写入 (键盘模拟, ' + label + ' ' + charInfo + ')';
+        `,
+      });
+      step2Inner = extractMcpResult(verifyResult);
+
+      if (!step2Inner.startsWith("FAIL")) break;
+    }
 
     // textarea 消失 → 重新导航（Step 1）后重试，仅重试一次
     if (step2Inner.startsWith("FAIL: textarea 消失") && attempt === 1) {
@@ -308,11 +409,11 @@ export async function handlePostTweet(
       tabId,
       timeoutMs: 55000,
       code: `
+        ${IS_TWEET_BTN_READY}
         for (let i = 0; i < 60; i++) {
           await new Promise(r => setTimeout(r, 1000));
           const att = document.querySelector('[data-testid="attachments"]');
-          const btn = document.querySelector('[data-testid="tweetButton"]');
-          if (att && btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
+          if (att && isTweetBtnReady()) {
             if (window.__xPost) return window.__xPost.advance();
             return '[step 4/7] 媒体上传完成 (直接确认)';
           }
@@ -342,10 +443,10 @@ export async function handlePostTweet(
     tabId,
     timeoutMs: 70000,
     code: `
+      ${IS_TWEET_BTN_READY}
       for (let i = 0; i < 60; i++) {
         await new Promise(r => setTimeout(r, 1000));
-        const btn = document.querySelector('[data-testid="tweetButton"]');
-        if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
+        if (isTweetBtnReady()) {
           await new Promise(r => setTimeout(r, 800 + Math.random() * 700));
           if (window.__xPost) return window.__xPost.advance();
           return '[step 5/7] 发帖按钮可用 (直接确认)';
@@ -377,37 +478,88 @@ export async function handlePostTweet(
 
   const step6Result = await mcp.callTool("chrome_javascript", {
     tabId,
+    timeoutMs: 15000,
     code: `
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 20; i++) {
         await new Promise(r => setTimeout(r, 500));
+        // 检查成功 toast: "Your Post was sent" / "Your Tweet was sent"
+        const toasts = document.querySelectorAll('[data-testid="toast"]');
+        for (const t of toasts) {
+          const txt = t.textContent || '';
+          if (txt.includes('sent') || txt.includes('发送') || txt.includes('posted')) {
+            if (window.__xPost) return window.__xPost.advance();
+            return '[step 6/7] 已点击发帖 — 检测到成功提示: ' + txt.slice(0, 80);
+          }
+          // 检查错误 toast
+          if (txt.includes('error') || txt.includes('wrong') || txt.includes('failed') || txt.includes('失败') || txt.includes('Something went wrong')) {
+            return 'FAIL: 发布失败 — 错误提示: ' + txt.slice(0, 120);
+          }
+        }
+        // compose 页面已关闭（URL 不再包含 /compose）
         if (!document.location.href.includes('/compose')) {
           if (window.__xPost) return window.__xPost.advance();
-          return '[step 6/7] 已点击发帖 (直接确认)';
+          return '[step 6/7] 已点击发帖 — compose 已关闭 (无toast)';
         }
       }
-      return 'FAIL: 点击后仍停留在编辑页';
+      return 'FAIL: 点击后 10s 内未检测到成功提示且未离开编辑页';
     `,
   });
 
   const step6Inner = extractMcpResult(step6Result);
   if (step6Inner.startsWith("FAIL")) {
     log.error(`Step 6 FAIL [${mark("step6", step6Start)}ms]: ${step6Inner}`);
-    return { ok: false, reason: "STEP6_FAIL", userMessage: `❌ 发推可能失败（仍在编辑页）: ${step6Inner}` };
+    return { ok: false, reason: "STEP6_FAIL", userMessage: `❌ 发推失败: ${step6Inner}` };
   }
   log.info(`Step 6 OK [${mark("step6", step6Start)}ms]: ${step6Inner}`);
 
-  // ── Step 7: Verify success ───────────────────────────────────────────────
+  // ── Step 7: 二次确认 — 检查 timeline 中是否出现刚发的帖子 ────────────────
   const step7Start = Date.now();
-  log.info("Step 7: 确认发布成功");
+  log.info("Step 7: 二次确认发布成功");
   const step7Result = await mcp.callTool("chrome_javascript", {
     tabId,
+    timeoutMs: 10000,
     code: `
-      await new Promise(r => setTimeout(r, 1000));
-      if (document.location.href.includes('x.com') && !document.location.href.includes('/compose')) {
-        if (window.__xPost) return window.__xPost.advance();
-        return '[step 7/7] 发帖成功 (直接确认)';
+      await new Promise(r => setTimeout(r, 1500));
+
+      // 检查是否有错误提示弹窗（如重复发帖、限流等）
+      const errDialog = document.querySelector('[data-testid="confirmationSheetConfirm"]');
+      if (errDialog) return 'FAIL: 出现确认弹窗，可能发布异常';
+
+      // 检查是否仍在 compose 页面
+      if (document.location.href.includes('/compose')) {
+        return 'FAIL: 仍在编辑页，发布可能未成功';
       }
-      return 'FAIL: 当前 URL = ' + document.location.href;
+
+      // 确认在 x.com 上
+      if (!document.location.href.includes('x.com') && !document.location.href.includes('twitter.com')) {
+        return 'FAIL: 当前不在 x.com, URL=' + document.location.href;
+      }
+
+      // 在 timeline 中查找包含推文内容的帖子（取前 30 字匹配）
+      const snippet = ${JSON.stringify(finalText.slice(0, 30))};
+      const tweets = document.querySelectorAll('article[data-testid="tweet"]');
+      for (const tweet of tweets) {
+        const tweetText = tweet.textContent || '';
+        if (tweetText.includes(snippet)) {
+          if (window.__xPost) return window.__xPost.advance();
+          return '[step 7/7] 发帖成功 — 在 timeline 中确认帖子已出现';
+        }
+      }
+
+      // timeline 中未找到帖子，但 compose 已关闭且无错误，可能是加载延迟
+      // 检查是否有成功 toast 残留
+      const toasts = document.querySelectorAll('[data-testid="toast"]');
+      for (const t of toasts) {
+        const txt = t.textContent || '';
+        if (txt.includes('sent') || txt.includes('发送') || txt.includes('posted')) {
+          if (window.__xPost) return window.__xPost.advance();
+          return '[step 7/7] 发帖成功 — 有成功 toast 提示 (timeline 尚未刷新)';
+        }
+      }
+
+      // compose 已关闭、无错误弹窗、在 x.com — 大概率成功但无法严格确认
+      if (window.__xPost) return window.__xPost.advance();
+      return '[step 7/7] 发帖可能成功 — compose已关闭且无错误 (无法在timeline确认)';
     `,
   });
 
