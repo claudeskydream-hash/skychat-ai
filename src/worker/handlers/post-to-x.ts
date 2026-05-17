@@ -45,15 +45,25 @@ async function inputText(text) {
 /**
  * 检查 X 平台字数限制指示器，返回 { overLimit, charInfo }。
  * overLimit=true 表示超出限制，charInfo 是日志用的字数信息字符串。
+ *
+ * 判断优先级：
+ * 1. tweetCharacterCount 元素文本为负数（最可靠，X 显示剩余字数，超限变负）
+ * 2. tweetCharacterCountFill 圆圈 stroke 颜色变红（X 红色 #f4212e / rgb(244,33,46)）
  */
 const CHECK_CHAR_LIMIT = `
 function checkCharLimit() {
-  const charCountEl = document.querySelector('[data-testid="tweetCharacterCountFill"]')
-    || document.querySelector('[data-testid="tweetCharacterCount"]');
-  const charInfo = charCountEl ? 'charCount=' + charCountEl.textContent : '';
-  const overLimit = !!document.querySelector('[data-testid="tweetCharacterCountFill"][style*="216"]')
-    || (charCountEl && parseInt(charCountEl.textContent || '0') < 0);
-  return { overLimit, charInfo };
+  const countEl = document.querySelector('[data-testid="tweetCharacterCount"]');
+  const fillEl = document.querySelector('[data-testid="tweetCharacterCountFill"]');
+  const text = (countEl?.textContent || fillEl?.textContent || '').trim();
+  const charInfo = text ? 'charCount=' + text : '';
+  const remaining = parseInt(text, 10);
+  const overByCount = !isNaN(remaining) && remaining < 0;
+  let overByColor = false;
+  if (!overByCount && fillEl) {
+    const stroke = fillEl.getAttribute('stroke') || window.getComputedStyle(fillEl).stroke || '';
+    overByColor = stroke.includes('#f4212e') || stroke.includes('244, 33') || stroke.includes('244,33');
+  }
+  return { overLimit: overByCount || overByColor, charInfo };
 }
 `;
 
@@ -222,7 +232,6 @@ export async function handlePostTweet(
   log.info("Step 2: 写入正文");
   const encodedText = JSON.stringify(finalText);
 
-  log.info(`Step 2 OK [${mark("step1", step1Start)}ms]: 888886=========================`);
   // 最多尝试 2 次：如果 textarea 不存在，重新执行 Step 1 导航后再试
   let step2Inner = "";
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -585,6 +594,11 @@ function extractMcpResult(raw: string): string {
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.result === "string") return parsed.result;
+    if (parsed && parsed.success === false) {
+      const kind = parsed.error?.kind;
+      const msg = parsed.error?.message ?? "未知错误";
+      return kind === "timeout" ? `FAIL: MCP调用超时 (${msg})` : `FAIL: ${msg}`;
+    }
   } catch {}
   return raw;
 }
