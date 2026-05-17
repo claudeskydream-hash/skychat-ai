@@ -1,4 +1,3 @@
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { createLogger } from "./logger.js";
 import type {
   Channel,
@@ -19,6 +18,8 @@ import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { McpManager } from "./mcp.js";
 import { transcribeFromUrl } from "./asr.js";
 import { textToSpeech } from "./tts.js";
+import { Worker, extractIntent, stripIntentBlock } from "./worker/index.js";
+import { ensureSchedulerTasks } from "./scheduler.js";
 
 const log = createLogger("网关");
 
@@ -55,13 +56,18 @@ export class Gateway {
     glm: "智谱 GLM",
     openrouter: "OpenRouter · 300+ 第三方模型",
   };
-  // Webhook HTTP server
-  private webhookServer: Server | null = null;
   // MCP client manager
   private mcp = new McpManager();
+  // Worker module for serialized chrome-MCP operations
+  private worker: Worker;
 
   constructor(config: WaiConfig) {
     this.config = config;
+    this.worker = new Worker((channel, targetId, replyToken, text) => {
+      const ch = this.channels.get(channel);
+      if (!ch) return Promise.resolve();
+      return ch.send({ targetId, text, replyToken });
+    });
   }
 
   /** Register a middleware function */
@@ -132,7 +138,13 @@ export class Gateway {
       }
     }
 
-    this.startWebhook();
+    // Start worker (loads persisted queue)
+    await this.worker.start();
+
+    // Ensure scheduler is running and default tasks are registered (non-blocking)
+    ensureSchedulerTasks().catch((err) =>
+      log.warn(`调度器初始化失败: ${err instanceof Error ? err.message : err}`),
+    );
 
     // Prompt for saved sessions before starting channels
     if (!process.env.WAI_DAEMON) {
@@ -151,10 +163,7 @@ export class Gateway {
 
   async stop(): Promise<void> {
     log.info("正在关闭...");
-    if (this.webhookServer) {
-      this.webhookServer.close();
-      this.webhookServer = null;
-    }
+    await this.worker.shutdown();
     await this.mcp.disconnect();
     const stops = [...this.channels.values()].map((ch) => ch.stop());
     await Promise.allSettled(stops);
@@ -373,6 +382,39 @@ export class Gateway {
 
       // Compose: middlewares + core handler (Koa-style onion model)
       await this.compose(ctx, [...this.middlewares, coreHandler]);
+
+      // Check for intent block in AI response → route to worker queue
+      if (ctx.response) {
+        const intent = extractIntent(ctx.response);
+        if (intent) {
+          log.info(`[INTENT] 检测到意图: ${intent.name}  params=${JSON.stringify(intent.params).slice(0, 200)}`);
+          const taskId = await this.worker.enqueue({
+            intent: intent.name,
+            params: intent.params,
+            channel: msg.channel,
+            targetId: msg.senderId,
+            replyToken: msg.replyToken,
+          });
+          log.info(`[INTENT] 入队成功: ${intent.name}  taskId=${taskId}  channel=${msg.channel}  target=${msg.senderId.slice(0, 8)}…`);
+          // Send the human-readable confirmation part (strip <intent> block)
+          const confirmText = stripIntentBlock(ctx.response) || `📋 任务已排队 #${taskId}，正在执行...`;
+          await channel.send({
+            targetId: msg.senderId,
+            text: confirmText,
+            replyToken: msg.replyToken,
+          });
+          return;
+        }
+        // Print a preview of the response so we can see *why* no intent was extracted
+        // (e.g. plain text follow-up, malformed <intent> tag, JSON syntax error)
+        const preview = ctx.response.replace(/\s+/g, " ").slice(0, 200);
+        const hasOpenTag = /<intent>/i.test(ctx.response);
+        const hasCloseTag = /<\/intent>/i.test(ctx.response);
+        const tagHint = hasOpenTag || hasCloseTag
+          ? ` [intent标签: open=${hasOpenTag} close=${hasCloseTag}]`
+          : "";
+        log.info(`[INTENT] 未检测到意图，正常回复 (${ctx.response.length} chars)${tagHint}  preview="${preview}${ctx.response.length > 200 ? "…" : ""}"`);
+      }
 
       // Send response if available
       if (ctx.response) {
@@ -612,84 +654,6 @@ export class Gateway {
         this.channels.delete(ch.name);
       }
     }
-  }
-
-  private startWebhook(): void {
-    const webhookConfig = this.config.webhook;
-    if (!webhookConfig?.enabled) return;
-
-    const port = webhookConfig.port || 4800;
-    const secret = webhookConfig.secret;
-
-    this.webhookServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      // Only accept POST
-      if (req.method !== "POST") {
-        res.writeHead(405, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Method not allowed" }));
-        return;
-      }
-
-      // Auth check
-      if (secret && req.headers["authorization"] !== `Bearer ${secret}`) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Unauthorized" }));
-        return;
-      }
-
-      // Parse body
-      let body: string;
-      try {
-        body = await new Promise<string>((resolve, reject) => {
-          const chunks: Buffer[] = [];
-          req.on("data", (chunk: Buffer) => chunks.push(chunk));
-          req.on("end", () => resolve(Buffer.concat(chunks).toString()));
-          req.on("error", reject);
-        });
-      } catch {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Failed to read body" }));
-        return;
-      }
-
-      let payload: { channel?: string; targetId?: string; text?: string };
-      try {
-        payload = JSON.parse(body);
-      } catch {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Invalid JSON" }));
-        return;
-      }
-
-      const { channel: channelName, targetId, text } = payload;
-      if (!channelName || !targetId || !text) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Missing required fields: channel, targetId, text" }));
-        return;
-      }
-
-      const channel = this.channels.get(channelName);
-      if (!channel) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: `Channel "${channelName}" not found` }));
-        return;
-      }
-
-      try {
-        await channel.send({ targetId, text });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
-        log.info(`Webhook: 已发送消息到 ${channelName}:${targetId}`);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        log.error(`Webhook 发送失败: ${errMsg}`);
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Failed to send message" }));
-      }
-    });
-
-    this.webhookServer.listen(port, () => {
-      log.info(`Webhook 服务已启动: http://localhost:${port}`);
-    });
   }
 
   private async handleCommand(msg: InboundMessage): Promise<void> {

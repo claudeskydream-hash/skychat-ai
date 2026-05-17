@@ -1,5 +1,5 @@
 import { createLogger } from "../logger.js";
-import { getAccountsDir, ensureDir, loadConfig } from "../config.js";
+import { getAccountsDir, getDataDir, ensureDir, loadConfig } from "../config.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { readFile, writeFile, unlink } from "node:fs/promises";
@@ -8,6 +8,8 @@ import { randomBytes, randomUUID, createDecipheriv, createCipheriv } from "node:
 import { createHash } from "node:crypto";
 import type { Channel, InboundMessage, OutboundMessage, ChannelConfig, MediaAttachment } from "../types.js";
 import { encodeToSilk } from "../voice-encode.js";
+
+const INBOUND_DIR = join(getDataDir(), "inbound");
 
 const log = createLogger("weixin");
 
@@ -353,11 +355,18 @@ export class WeixinChannel implements Channel {
               await this.maybeSendGreetingAndGuide(msg.from_user_id, msg.context_token);
             }
 
+            // Persist inbound images to local files so the bot model can reference them by path
+            const persistedPaths = await persistImagesToFiles(content.media);
+            let inboundText = content.text;
+            if (persistedPaths.length > 0) {
+              inboundText += `\n\n[附带媒体文件]\n${persistedPaths.map((p) => `- ${p}`).join("\n")}`;
+            }
+
             onMessage({
               id: String(msg.message_id || msg.seq || Date.now()),
               channel: "weixin",
               senderId: msg.from_user_id,
-              text: content.text,
+              text: inboundText,
               media: content.media.length > 0 ? content.media : undefined,
               isVoice: content.isVoice || undefined,
               replyToken: msg.context_token,
@@ -1374,4 +1383,30 @@ function detectImageType(buf: Buffer): string {
   if (buf[0] === 0x47 && buf[1] === 0x49) return "image/gif";
   if (buf[0] === 0x52 && buf[1] === 0x49) return "image/webp";
   return "image/jpeg"; // default
+}
+
+/** Persist inbound image data-URLs to local files; returns absolute paths */
+async function persistImagesToFiles(media: MediaAttachment[]): Promise<string[]> {
+  const paths: string[] = [];
+  const imageItems = media.filter((m) => m.type === "image" && m.url?.startsWith("data:"));
+  if (imageItems.length === 0) return paths;
+
+  try {
+    await ensureDir(INBOUND_DIR);
+    for (const m of imageItems) {
+      const match = m.url!.match(/^data:([^;]+);base64,(.+)$/s);
+      if (!match) continue;
+      const mime = match[1]!;
+      const ext = mime.includes("png") ? "png" : mime.includes("gif") ? "gif" : mime.includes("webp") ? "webp" : "jpg";
+      const filename = `wx_inbound_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
+      const fullPath = join(INBOUND_DIR, filename);
+      await writeFile(fullPath, Buffer.from(match[2]!, "base64"));
+      paths.push(fullPath);
+      log.debug(`已落盘图片: ${fullPath}`);
+    }
+  } catch (err) {
+    log.warn(`图片落盘失败: ${err instanceof Error ? err.message : err}`);
+  }
+
+  return paths;
 }

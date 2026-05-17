@@ -65,16 +65,24 @@ export class ClaudeAgentProvider implements Provider {
       sdkOptions.systemPrompt = options.systemPrompt;
     }
 
-    log.info(`Querying Claude (session: ${sessionId.slice(0, 8)}...)`);
+    const promptPreview = prompt.replace(/\s+/g, " ").slice(0, 120);
+    log.info(`Querying Claude (session: ${sessionId.slice(0, 8)}..., resume=${existingSession ? existingSession.slice(0, 8) + "…" : "新会话"}, allowedTools=${allowedTools.length}, prompt="${promptPreview}${prompt.length > 120 ? "…" : ""}")`);
 
     let result = "";
     let newSessionId: string | undefined;
+    let msgCount = 0;
+    const msgTypeCounts: Record<string, number> = {};
+    const queryStart = Date.now();
 
     try {
       for await (const message of query({
         prompt,
         options: sdkOptions as any,
       })) {
+        msgCount++;
+        const msgType = `${(message as any)?.type ?? "?"}${(message as any)?.subtype ? ":" + (message as any).subtype : ""}`;
+        msgTypeCounts[msgType] = (msgTypeCounts[msgType] || 0) + 1;
+
         // Capture session ID from init message
         if (isInitMessage(message)) {
           newSessionId = message.session_id;
@@ -96,7 +104,7 @@ export class ClaudeAgentProvider implements Provider {
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      log.error(`Claude query failed: ${errMsg}`);
+      log.error(`Claude query failed [${Date.now() - queryStart}ms, ${msgCount}条消息]: ${errMsg}  msgTypes=${JSON.stringify(msgTypeCounts)}`);
       throw err;
     }
 
@@ -105,11 +113,15 @@ export class ClaudeAgentProvider implements Provider {
       this.sessions.set(sessionId, newSessionId);
     }
 
-    if (!result) {
+    const isEmpty = !result;
+    if (isEmpty) {
+      // 空响应时清除 session，下次请求将新建会话，避免反复 resume 坏 session
+      this.sessions.delete(sessionId);
+      log.warn(`Claude 返回空响应 [${Date.now() - queryStart}ms, 共${msgCount}条消息]  msgTypes=${JSON.stringify(msgTypeCounts)}  newSessionId=${newSessionId ?? "无"}  已清除 session`);
       result = "(No response from Claude)";
     }
 
-    log.info(`Response: ${result.length} chars`);
+    log.info(`Response: ${result.length} chars [${Date.now() - queryStart}ms, ${msgCount}条消息]  msgTypes=${JSON.stringify(msgTypeCounts)}`);
     return result;
   }
 }

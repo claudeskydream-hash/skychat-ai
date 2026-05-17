@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import type { ProviderConfig } from "./types.js";
 import { loadConfig, saveConfig, getDataDir } from "./config.js";
 import { Gateway } from "./gateway.js";
-import { setLogLevel, createLogger } from "./logger.js";
+import { setLogLevel, initFileLogger, createLogger } from "./logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
@@ -190,6 +190,15 @@ async function main() {
 
   const logLevel = (process.env.WAI_LOG_LEVEL || "info") as "debug" | "info" | "warn" | "error";
   setLogLevel(logLevel);
+
+  // File logging: always write to D:\AIWorkSpace\Log (or WAI_LOG_DIR override)
+  const logDir = process.env.WAI_LOG_DIR || "D:\\AIWorkSpace\\Log";
+  initFileLogger(logDir);
+  // Print log file location so it's easy to tail or inspect
+  const today = new Date().toISOString().slice(0, 10);
+  const { join: pathJoin } = await import("node:path");
+  const logFile = pathJoin(logDir, `skychat-${today}.log`);
+  console.log(`\x1b[2m  日志文件: ${logFile}\x1b[0m`);
 
   if (command === "--version" || command === "-v") {
     console.log(`skychat-ai v${VERSION}`);

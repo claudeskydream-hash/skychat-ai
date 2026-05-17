@@ -155,15 +155,6 @@ export interface McpServerConfig {
   url?: string;
 }
 
-export interface WebhookConfig {
-  /** Enable webhook HTTP server */
-  enabled?: boolean;
-  /** Port to listen on (default: 4800) */
-  port?: number;
-  /** Optional secret token for authentication */
-  secret?: string;
-}
-
 export interface SkillConfig {
   /** Human-readable description */
   description?: string;
@@ -200,9 +191,6 @@ export interface WaiConfig {
 
   /** Message chunk size limit */
   chunkSize?: number;
-
-  /** Webhook HTTP server config */
-  webhook?: WebhookConfig;
 
   /** MCP server configurations */
   mcpServers?: Record<string, McpServerConfig>;
