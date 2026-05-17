@@ -2,6 +2,30 @@ import { spawn } from "node:child_process";
 import type { WorkerTask, WorkerCtx, WorkerResult } from "../types.js";
 
 const SCRIPT_PATH = "C:\\Users\\Administrator\\.claude\\skills\\post-to-xhs\\scripts\\publish_pipeline.py";
+const XHS_TITLE_LIMIT = 38;
+
+/** 小红书标题显示宽度：CJK/emoji 计2，ASCII 计1 */
+function xhsDisplayWidth(s: string): number {
+  let w = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)!;
+    w += (cp > 0x2E7F && cp <= 0x9FFF)   // CJK 主区
+      || (cp >= 0xF900 && cp <= 0xFAFF)   // CJK 兼容
+      || (cp >= 0xFF01 && cp <= 0xFF60)   // 全角
+      || (cp >= 0x3000 && cp <= 0x303F)   // CJK 符号
+      || (cp >= 0x1F000)                  // Emoji / 补充符号
+      ? 2 : 1;
+  }
+  return w;
+}
+
+/** 超出限制时从末尾截断并补省略号 */
+function truncateTitle(title: string): string {
+  if (xhsDisplayWidth(title) <= XHS_TITLE_LIMIT) return title;
+  const chars = [...title];
+  while (xhsDisplayWidth(chars.join("")) > XHS_TITLE_LIMIT - 1) chars.pop();
+  return chars.join("") + "…";
+}
 
 export interface PostXhsParams {
   title: string;
@@ -39,7 +63,13 @@ export async function handlePostXhs(
     return { ok: false, reason: "MISSING_MEDIA", userMessage: "❌ 发小红书失败：小红书图文必须包含图片或视频" };
   }
 
-  const args: string[] = [SCRIPT_PATH, "--title", title, "--content", content];
+  // 服务端兜底截断标题，防止 AI 计算宽度有误导致 publish_pipeline.py 报错退出
+  const finalTitle = truncateTitle(title.trim());
+  if (finalTitle !== title.trim()) {
+    log.warn(`标题超限已截断: ${xhsDisplayWidth(title)} → ${xhsDisplayWidth(finalTitle)} "${finalTitle}"`);
+  }
+
+  const args: string[] = [SCRIPT_PATH, "--title", finalTitle, "--content", content];
 
   if (headless) args.push("--headless");
   if (account) args.push("--account", account);
