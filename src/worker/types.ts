@@ -24,6 +24,17 @@ export interface DeleteTweetParams {
   keyword: string;
 }
 
+export interface PostXhsParams {
+  title: string;
+  content: string;
+  imageUrls?: string[];
+  imagePaths?: string[];
+  videoPath?: string;
+  videoUrl?: string;
+  account?: string;
+  headless?: boolean;
+}
+
 export interface WorkerResult {
   ok: boolean;
   userMessage: string;
