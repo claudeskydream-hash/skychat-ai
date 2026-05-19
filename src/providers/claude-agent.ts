@@ -115,9 +115,13 @@ export class ClaudeAgentProvider implements Provider {
 
     const isEmpty = !result;
     if (isEmpty) {
-      // 空响应时清除 session，下次请求将新建会话，避免反复 resume 坏 session
       this.sessions.delete(sessionId);
       log.warn(`Claude 返回空响应 [${Date.now() - queryStart}ms, 共${msgCount}条消息]  msgTypes=${JSON.stringify(msgTypeCounts)}  newSessionId=${newSessionId ?? "无"}  已清除 session`);
+      // 若本次是 resume 旧 session，自动以新 session 重试一次（context 过长时 GLM 易返回空）
+      if (existingSession) {
+        log.info(`空响应来自 resume 会话，自动新建 session 重试...`);
+        return this.query(prompt, sessionId, options);
+      }
       result = "(No response from Claude)";
     }
 
