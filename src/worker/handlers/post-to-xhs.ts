@@ -3,6 +3,7 @@ import type { WorkerTask, WorkerCtx, WorkerResult } from "../types.js";
 
 const SCRIPT_PATH = "C:\\Users\\Administrator\\.claude\\skills\\post-to-xhs\\scripts\\publish_pipeline.py";
 const XHS_TITLE_LIMIT = 38;
+const XHS_CONTENT_LIMIT = 1000;
 
 /** 小红书标题显示宽度：CJK/emoji 计2，ASCII 计1 */
 function xhsDisplayWidth(s: string): number {
@@ -25,6 +26,43 @@ function truncateTitle(title: string): string {
   const chars = [...title];
   while (xhsDisplayWidth(chars.join("")) > XHS_TITLE_LIMIT - 1) chars.pop();
   return chars.join("") + "…";
+}
+
+/**
+ * 末行若为 "#标签1 #标签2 ..." 则视为话题行 (publish_pipeline 会从末行提取话题)。
+ * 截断正文时要保留这一行，否则话题丢失。
+ */
+function splitTopicTail(content: string): { body: string; topicLine: string } {
+  const lines = content.split(/\r?\n/);
+  while (lines.length && (lines[lines.length - 1] ?? "").trim() === "") lines.pop();
+  if (!lines.length) return { body: content, topicLine: "" };
+
+  const last = (lines[lines.length - 1] ?? "").trim();
+  const parts = last.split(/\s+/).filter(Boolean);
+  if (parts.length && parts.every((p) => /^#[^\s#]+$/.test(p))) {
+    return { body: lines.slice(0, -1).join("\n").replace(/\s+$/, ""), topicLine: last };
+  }
+  return { body: content, topicLine: "" };
+}
+
+/**
+ * 正文按 JS 字符长度 (与 publish_pipeline.py 的 len() 一致) 截断到 ≤1000 字。
+ * 保留尾部 "#话题" 行，主体超出时从末尾截断补省略号。
+ */
+function truncateContent(content: string): string {
+  if (content.length <= XHS_CONTENT_LIMIT) return content;
+
+  const { body, topicLine } = splitTopicTail(content);
+  const tail = topicLine ? "\n\n" + topicLine : "";
+  const ellipsis = "…";
+  const budget = XHS_CONTENT_LIMIT - tail.length - ellipsis.length;
+  if (budget <= 0) {
+    // 极端情况：话题行本身就快占满 1000 字，退而求次保留前 budget 字
+    return content.slice(0, XHS_CONTENT_LIMIT);
+  }
+
+  const truncatedBody = body.slice(0, budget).replace(/\s+$/, "");
+  return truncatedBody + ellipsis + tail;
 }
 
 export interface PostXhsParams {
@@ -69,7 +107,14 @@ export async function handlePostXhs(
     log.warn(`标题超限已截断: ${xhsDisplayWidth(title)} → ${xhsDisplayWidth(finalTitle)} "${finalTitle}"`);
   }
 
-  const args: string[] = [SCRIPT_PATH, "--title", finalTitle, "--content", content];
+  // 同样兜底截断正文 (XHS 上限 1000 字符)
+  const trimmedContent = content.trim();
+  const finalContent = truncateContent(trimmedContent);
+  if (finalContent !== trimmedContent) {
+    log.warn(`正文超限已截断: ${trimmedContent.length} → ${finalContent.length}`);
+  }
+
+  const args: string[] = [SCRIPT_PATH, "--title", finalTitle, "--content", finalContent];
 
   if (headless) args.push("--headless");
   if (account) args.push("--account", account);
