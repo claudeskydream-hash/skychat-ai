@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createLogger } from "../logger.js";
 import type { Provider, ProviderOptions, ProviderConfig } from "../types.js";
 
@@ -13,10 +15,46 @@ function sanitizeKey(key: string): string {
 export class ClaudeAgentProvider implements Provider {
   readonly name = "claude-agent";
   private config: ProviderConfig;
-  private sessions = new Map<string, string>(); // userId -> sessionId
+  private sessions = new Map<string, string>(); // sessionKey -> SDK sessionId
+  private memoryDir?: string;
+  private sessionsFile?: string;
 
-  constructor(config: ProviderConfig) {
+  constructor(config: ProviderConfig, memoryDir?: string) {
     this.config = config;
+    if (memoryDir) {
+      this.memoryDir = memoryDir;
+      this.sessionsFile = join(memoryDir, "sessions.json");
+      this.loadSessions();
+    }
+  }
+
+  /** Load the persisted sessionKey→sessionId map from the memory directory */
+  private loadSessions(): void {
+    if (!this.memoryDir || !this.sessionsFile) return;
+    try {
+      if (!existsSync(this.memoryDir)) {
+        mkdirSync(this.memoryDir, { recursive: true });
+      }
+      if (existsSync(this.sessionsFile)) {
+        const obj = JSON.parse(readFileSync(this.sessionsFile, "utf-8")) as Record<string, string>;
+        for (const [key, val] of Object.entries(obj)) {
+          if (typeof val === "string") this.sessions.set(key, val);
+        }
+        log.info(`已从 ${this.sessionsFile} 加载 ${this.sessions.size} 条会话记忆`);
+      }
+    } catch (err) {
+      log.warn(`加载会话记忆失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Persist the sessionKey→sessionId map to the memory directory */
+  private persistSessions(): void {
+    if (!this.sessionsFile) return;
+    try {
+      writeFileSync(this.sessionsFile, JSON.stringify(Object.fromEntries(this.sessions), null, 2));
+    } catch (err) {
+      log.warn(`保存会话记忆失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async query(
@@ -46,6 +84,8 @@ export class ClaudeAgentProvider implements Provider {
     const sdkOptions: Record<string, unknown> = {
       allowedTools,
       permissionMode: "acceptEdits" as const,
+      settingSources: ["user", "project"],
+      skills: "all",
     };
 
     if (options?.maxTokens) {
@@ -54,6 +94,9 @@ export class ClaudeAgentProvider implements Provider {
 
     if (options?.cwd) {
       sdkOptions.cwd = options.cwd;
+    } else if (this.memoryDir) {
+      // Fixed working directory: SDK always operates from the memory directory
+      sdkOptions.cwd = this.memoryDir;
     }
 
     // Resume existing session for conversation continuity
@@ -111,11 +154,13 @@ export class ClaudeAgentProvider implements Provider {
     // Store session for continuity
     if (newSessionId) {
       this.sessions.set(sessionId, newSessionId);
+      this.persistSessions();
     }
 
     const isEmpty = !result;
     if (isEmpty) {
       this.sessions.delete(sessionId);
+      this.persistSessions();
       log.warn(`Claude 返回空响应 [${Date.now() - queryStart}ms, 共${msgCount}条消息]  msgTypes=${JSON.stringify(msgTypeCounts)}  newSessionId=${newSessionId ?? "无"}  已清除 session`);
       // 若本次是 resume 旧 session，自动以新 session 重试一次（context 过长时 GLM 易返回空）
       if (existingSession) {
