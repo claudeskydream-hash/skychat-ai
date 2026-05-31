@@ -1,7 +1,14 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 import type { WorkerTask, WorkerCtx, WorkerResult } from "../types.js";
 
 const SCRIPT_PATH = "C:\\Users\\Administrator\\.claude\\skills\\post-to-xhs\\scripts\\publish_pipeline.py";
+
+// RedInk 本地后端 — 图片链接不可达时用它生成 1 张封面图兜底.
+const REDINK_BASE_URL = process.env.REDINK_BASE_URL || "http://127.0.0.1:12398";
+const REDINK_HISTORY_DIR = process.env.REDINK_HISTORY_DIR
+  || "D:\\AIWorkSpace\\GitHubTools\\RedInk\\history";
+const REDINK_GEN_TIMEOUT_MS = 120_000;
 const XHS_TITLE_LIMIT = 38;
 const XHS_CONTENT_LIMIT = 1000;
 
@@ -65,6 +72,139 @@ function truncateContent(content: string): string {
   return truncatedBody + ellipsis + tail;
 }
 
+/**
+ * 探测图片 URL 可达性, 容忍单次网络抖动.
+ *   1. HEAD (timeout=6s) — 快路径
+ *   2. HEAD 失败 → GET Range bytes=0-0 (timeout=12s) — 兜底
+ *      不少 CDN/反爬对 HEAD 行为不一致, Range 只取 1 字节比全量 GET 省流量.
+ */
+async function probeImageUrl(url: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    const r = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(6000) });
+    if (r.ok) return { ok: true };
+    if (r.status >= 400 && r.status < 500 && r.status !== 405) {
+      // 405 (Method Not Allowed) 在 HEAD 上常见, 留给 GET 重试; 其他 4xx 是确定性错误.
+      return { ok: false, reason: `图片链接无效 (HEAD ${r.status})` };
+    }
+  } catch {
+    // 网络抖动 / 超时 — 落到 GET 兜底
+  }
+  try {
+    const r = await fetch(url, {
+      method: "GET",
+      headers: { Range: "bytes=0-0" },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (r.ok || r.status === 206) return { ok: true };
+    return { ok: false, reason: `图片链接无效 (GET ${r.status})` };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, reason: `图片链接无法访问 (${msg})` };
+  }
+}
+
+/**
+ * 调 RedInk SSE 流生成 1 张封面图作为兜底.
+ *
+ * 返回本地图片绝对路径, 失败返回 null.
+ *
+ * RedInk 把图存到 history/<task_id>/<filename>; 我们用 publish_pipeline 能直接读的本地路径回填.
+ */
+async function generateFallbackCover(
+  title: string,
+  content: string,
+  taskId: string,
+  log: WorkerCtx["log"],
+): Promise<string | null> {
+  const redinkTaskId = `xhs_fallback_${taskId}`;
+  const payload = {
+    task_id: redinkTaskId,
+    user_topic: title,
+    full_outline: "",
+    pages: [
+      {
+        index: 0,
+        type: "cover",
+        // content 字段是生图 prompt: 标题 + 正文摘要, 提供风格语境
+        content: `${title}\n\n${content.slice(0, 240)}`,
+      },
+    ],
+  };
+
+  let resp: Response;
+  const t0 = Date.now();
+  try {
+    resp = await fetch(`${REDINK_BASE_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload), // Node fetch 默认 UTF-8 编码
+      signal: AbortSignal.timeout(REDINK_GEN_TIMEOUT_MS),
+    });
+  } catch (e) {
+    log.warn(`RedInk 请求失败: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+  if (!resp.ok || !resp.body) {
+    log.warn(`RedInk 返回 HTTP ${resp.status}`);
+    return null;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let imageFilename: string | null = null;
+  let lastErrorMsg: string | null = null;
+
+  // SSE 解析: 每个事件块以空行 "\n\n" 分隔; 每行格式 "event: X" / "data: {...}".
+  outer: while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    while (true) {
+      const sep = buffer.indexOf("\n\n");
+      if (sep < 0) break;
+      const block = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+
+      let evt = "";
+      let dataStr = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) evt = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataStr = line.slice(5).trim();
+      }
+      if (!evt || !dataStr) continue;
+      let data: any;
+      try { data = JSON.parse(dataStr); } catch { continue; }
+
+      if (evt === "image") {
+        // 单张图完成 — 优先这条事件携带的 filename
+        const fn = data.filename || data.file || (Array.isArray(data.images) ? data.images[0] : null);
+        if (fn) {
+          imageFilename = fn;
+          break outer;
+        }
+      } else if (evt === "error") {
+        lastErrorMsg = data.message || data.error || "unknown";
+      } else if (evt === "finish" || evt === "complete") {
+        // 流结束 — 兜底再看 images[0]
+        if (!imageFilename && Array.isArray(data.images) && data.images.length > 0) {
+          imageFilename = data.images[0];
+        }
+        break outer;
+      }
+    }
+  }
+  try { reader.releaseLock(); } catch { /* ignore */ }
+
+  if (!imageFilename) {
+    log.warn(`RedInk 生图未返回图片 (${Date.now() - t0}ms): ${lastErrorMsg ?? "无图返回"}`);
+    return null;
+  }
+  const absPath = path.join(REDINK_HISTORY_DIR, redinkTaskId, imageFilename);
+  log.info(`RedInk 封面已生成 (${Date.now() - t0}ms): ${absPath}`);
+  return absPath;
+}
+
 export interface PostXhsParams {
   title: string;
   content: string;
@@ -87,7 +227,10 @@ export async function handlePostXhs(
 ): Promise<WorkerResult> {
   const { log } = ctx;
   const params = task.params as unknown as PostXhsParams;
-  const { title, content, imageUrls, imagePaths, videoPath, videoUrl, account } = params;
+  const { title, content, videoPath, videoUrl, account } = params;
+  // 图片来源可能被 RedInk fallback 替换, 故 let 而非 const
+  let imageUrls = params.imageUrls;
+  let imagePaths = params.imagePaths;
   const headless = params.headless !== false; // 默认 headless
 
   if (!title?.trim()) {
@@ -99,6 +242,35 @@ export async function handlePostXhs(
   const hasMedia = (imageUrls?.length ?? 0) > 0 || (imagePaths?.length ?? 0) > 0 || videoPath || videoUrl;
   if (!hasMedia) {
     return { ok: false, reason: "MISSING_MEDIA", userMessage: "❌ 发小红书失败：小红书图文必须包含图片或视频" };
+  }
+
+  // Pre-check image URLs before starting Chrome to fail fast on 404s.
+  // 跨境 CDN (raw.githubusercontent.com 等) 单次 HEAD 8s 容易抖动 fail (2026-05-26 实测一次过/一次超时).
+  // 策略: HEAD 短超时 → 失败时 GET Range 0-0 长超时兜底 → 仍失败才判 INVALID.
+  // 任意一张 URL 不可达 → 切到 RedInk 生 1 张封面图兜底 (publish_pipeline 不支持 URL+本地混用).
+  if (imageUrls?.length) {
+    let anyFailed: { url: string; reason: string } | null = null;
+    for (const url of imageUrls) {
+      const probe = await probeImageUrl(url);
+      if (!probe.ok) {
+        anyFailed = { url, reason: probe.reason };
+        break;
+      }
+    }
+    if (anyFailed) {
+      log.warn(`图片不可达, 调 RedInk 生封面兜底 (${anyFailed.reason}): ${anyFailed.url}`);
+      const fallback = await generateFallbackCover(title, content, task.id, log);
+      if (!fallback) {
+        return {
+          ok: false,
+          reason: "IMAGE_URL_INVALID",
+          userMessage: `❌ 发小红书失败：图片链接不可达, RedInk 生图兜底也失败了\n原始: ${anyFailed.reason}: ${anyFailed.url}`,
+        };
+      }
+      imageUrls = undefined;
+      imagePaths = [fallback];
+      log.info(`已切换到 RedInk 生成的封面图: ${fallback}`);
+    }
   }
 
   // 服务端兜底截断标题，防止 AI 计算宽度有误导致 publish_pipeline.py 报错退出
@@ -144,18 +316,64 @@ export async function handlePostXhs(
   const output = stdout.trim();
   const errOutput = stderr.trim();
   log.info(`publish_pipeline 退出码=${exitCode} stdout末行="${output.split("\n").pop()?.slice(0, 120) ?? ""}"`);
-  if (errOutput) log.warn(`publish_pipeline stderr: ${errOutput.slice(0, 300)}`);
+
+  // 每行单独打印，避免长 URL 被截断
+  if (errOutput) {
+    for (const line of errOutput.split("\n")) {
+      if (line.trim()) log.warn(`publish_pipeline stderr: ${line}`);
+    }
+  }
+
+  // 失败时输出完整 stdout 便于定位
+  if (exitCode !== 0) {
+    const stdoutLines = output.split("\n");
+    const contextLines = stdoutLines.slice(-10); // 最后10行
+    for (const line of contextLines) {
+      if (line.trim()) log.info(`publish_pipeline stdout: ${line}`);
+    }
+  }
 
   if (exitCode === 0) {
+    const publishStatusMatch = output.match(/^PUBLISH_STATUS:\s*(\w+)/m);
+    const publishStatus = publishStatusMatch?.[1]?.toUpperCase() ?? "PUBLISHED";
+
+    if (publishStatus === "DRAFT") {
+      return {
+        ok: false,
+        reason: "DRAFT",
+        userMessage: "⚠️ 小红书笔记已保存为草稿，未直接发布。请到小红书创作中心手动发布。",
+      };
+    }
+    if (publishStatus === "UNKNOWN") {
+      return {
+        ok: false,
+        reason: "UNKNOWN_PUBLISH",
+        userMessage: "⚠️ 小红书发布结果无法确认，请到小红书创作中心检查是否已发布（可能成功也可能在草稿中）。",
+      };
+    }
     return { ok: true, reason: "-", userMessage: "✅ 小红书笔记已发布" };
+  }
+
+  // Chrome 起不来时 publish_pipeline 会先 headless 失败、再切 headed 也失败，
+  // 退出码可能是 1 也可能是 2。无论哪种，只要 stderr 包含启动失败标志，都归类为 CHROME_LAUNCH_FAILED，
+  // 避免误导用户去重新登录。
+  const chromeLaunchFailed = /Chrome process exited|Failed to start Chrome|before port \d+ became available/i.test(errOutput);
+  if (chromeLaunchFailed) {
+    const firstErrLine = errOutput.split("\n").find((l) => l.trim()) ?? "";
+    return {
+      ok: false,
+      reason: "CHROME_LAUNCH_FAILED",
+      userMessage: `❌ 发小红书失败：专用 Chrome 启动失败（端口 9222 未就绪）。可能原因：上次 Chrome 进程残留 / profile 被占用。\n详情：${firstErrLine}`,
+    };
   }
 
   if (exitCode === 1) {
     return { ok: false, reason: "NOT_LOGGED_IN", userMessage: "❌ 发小红书失败：请先在专用 Chrome 中登录小红书账号" };
   }
 
-  // exitCode === 2 or other errors
-  const hint = errOutput.slice(0, 200) || output.slice(0, 200) || "未知错误";
+  // exitCode === 2 or other errors — 取第一条 stderr 行作为提示（完整，不截断 URL）
+  const firstErrLine = errOutput.split("\n").find((l) => l.trim()) ?? "";
+  const hint = firstErrLine || output.split("\n").find((l) => l.trim()) || "未知错误";
   return { ok: false, reason: "PUBLISH_FAIL", userMessage: `❌ 发小红书失败：${hint}` };
 }
 

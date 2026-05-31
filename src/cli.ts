@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
 import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { createRequire as __sk_createRequire } from "node:module";
 import type { ProviderConfig } from "./types.js";
 import { loadConfig, saveConfig, getDataDir } from "./config.js";
 import { Gateway } from "./gateway.js";
@@ -146,6 +148,65 @@ function isProviderReady(prov: ProviderConfig): boolean {
   return false;
 }
 
+/**
+ * Scan running node processes and return PIDs of all skychat-ai daemons.
+ * Excludes the current process. Returns [] on scan failure.
+ */
+function findSkychatPids(): number[] {
+  const pids: number[] = [];
+  const selfPid = process.pid;
+  // Match the long-running daemon only: cli.js at the END of the cmdline
+  // (no trailing subcommand like `logs -f` / `stop` / `start` / `set ...`).
+  // Without this guard, `skychat-ai logs -f` background tail processes would
+  // be detected as duplicate daemons and killed by stop / blocked by start.
+  const daemonRe = /(?:skychat[^"]*[\\/])?dist[\\/]cli\.js["']?\s*$/i;
+  try {
+    if (process.platform === "win32") {
+      const cmd = `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name='node.exe'\\" | ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CommandLine }"`;
+      const out = execSync(cmd, { encoding: "utf-8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+      for (const line of out.split(/\r?\n/)) {
+        const idx = line.indexOf("|");
+        if (idx < 0) continue;
+        const pid = parseInt(line.slice(0, idx).trim(), 10);
+        const cmdline = line.slice(idx + 1);
+        if (!pid || pid === selfPid) continue;
+        if (daemonRe.test(cmdline)) pids.push(pid);
+      }
+    } else {
+      const out = execSync("ps -ax -o pid=,command=", { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+      for (const line of out.split("\n")) {
+        const m = line.trim().match(/^(\d+)\s+(.*)$/);
+        if (!m) continue;
+        const pid = parseInt(m[1]!, 10);
+        const cmdline = m[2]!;
+        if (pid === selfPid) continue;
+        if (daemonRe.test(cmdline)) pids.push(pid);
+      }
+    }
+  } catch {
+    // ignore — caller falls back to pid-file behavior
+  }
+  return pids;
+}
+
+/**
+ * Force-kill a process and its descendants. Returns true if the process was
+ * either killed or already gone, false if the kill itself errored.
+ */
+function killProcessTree(pid: number): boolean {
+  try {
+    if (process.platform === "win32") {
+      execSync(`taskkill /PID ${pid} /T /F`, { stdio: "ignore", windowsHide: true });
+    } else {
+      try { process.kill(-pid, "SIGKILL"); } catch { process.kill(pid, "SIGKILL"); }
+    }
+    return true;
+  } catch {
+    // Already exited counts as success — verify with kill(pid, 0)
+    try { process.kill(pid, 0); return false; } catch { return true; }
+  }
+}
+
 async function autoUpdate(currentVersion: string): Promise<void> {
   // Skip in daemon mode
   if (process.env.WAI_DAEMON) return;
@@ -199,6 +260,27 @@ async function main() {
   const { join: pathJoin } = await import("node:path");
   const logFile = pathJoin(logDir, `skychat-${today}.log`);
   console.log(`\x1b[2m  日志文件: ${logFile}\x1b[0m`);
+
+  // [PROXY 2026-05-27] 必须在 logger init 之后, 才能把诊断信息写到主日志.
+  // 让 Node 内置 fetch / undici 自动识别 HTTP_PROXY / HTTPS_PROXY / NO_PROXY env.
+  // 同时把 globalThis.fetch 强制替换为 undici.fetch (避免被 node-fetch polyfill 接管).
+  const proxyLog = createLogger("startup");
+  proxyLog.warn(`[PROXY DIAG] HTTPS_PROXY=${process.env.HTTPS_PROXY ?? "<unset>"}, HTTP_PROXY=${process.env.HTTP_PROXY ?? "<unset>"}, NO_PROXY=${process.env.NO_PROXY ?? "<unset>"}`);
+  if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
+    try {
+      const undici = __sk_createRequire(import.meta.url)("undici");
+      undici.setGlobalDispatcher(new undici.EnvHttpProxyAgent());
+      const beforeFetchStr = (globalThis as any).fetch?.toString().slice(0, 100).replace(/\s+/g, " ") || "<none>";
+      const beforeFetchName = (globalThis as any).fetch?.name || "<anon>";
+      (globalThis as any).fetch = undici.fetch;
+      const afterFetchStr = (globalThis as any).fetch?.toString().slice(0, 100).replace(/\s+/g, " ") || "<none>";
+      proxyLog.warn(`[PROXY] dispatcher=EnvHttpProxyAgent installed; fetch replaced: before(name=${beforeFetchName}, str="${beforeFetchStr}") → after("${afterFetchStr}")`);
+    } catch (e) {
+      proxyLog.error(`[PROXY] install failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  } else {
+    proxyLog.warn(`[PROXY] no HTTP(S)_PROXY env set, skipping proxy dispatcher install`);
+  }
 
   if (command === "--version" || command === "-v") {
     console.log(`skychat-ai v${VERSION}`);
@@ -290,17 +372,17 @@ async function main() {
       const pidFile = join(getDataDir(), "daemon.pid");
       const logFile = join(getDataDir(), "daemon.log");
 
+      // Scan for any live daemon (covers orphans not in pid file)
+      const livePids = findSkychatPids();
+      if (livePids.length > 0) {
+        console.log(`\x1b[33m⚠\x1b[0m 已有进程在运行 (PID: ${livePids.join(", ")})`);
+        console.log(`  停止: skychat-ai stop`);
+        console.log(`  日志: skychat-ai logs`);
+        process.exit(1);
+      }
+      // Clean up stale pid file pointing at a dead process
       if (existsSync(pidFile)) {
-        const oldPid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
-        try {
-          process.kill(oldPid, 0);
-          console.log(`\x1b[33m⚠\x1b[0m 已有进程在运行 (PID: ${oldPid})`);
-          console.log(`  停止: skychat-ai stop`);
-          console.log(`  日志: skychat-ai logs`);
-          process.exit(1);
-        } catch {
-          unlinkSync(pidFile);
-        }
+        unlinkSync(pidFile);
       }
 
       const { spawn } = await import("node:child_process");
@@ -326,19 +408,35 @@ async function main() {
 
     case "stop": {
       const pidPath = join(getDataDir(), "daemon.pid");
-      if (!existsSync(pidPath)) {
+
+      // Collect both the recorded pid and every live skychat process (orphans included)
+      const recorded = existsSync(pidPath)
+        ? parseInt(readFileSync(pidPath, "utf-8").trim(), 10)
+        : Number.NaN;
+      const scanned = findSkychatPids();
+      const targets = [...new Set<number>([
+        ...(Number.isFinite(recorded) ? [recorded] : []),
+        ...scanned,
+      ])].filter((p) => p > 0 && p !== process.pid);
+
+      if (targets.length === 0) {
+        if (existsSync(pidPath)) unlinkSync(pidPath);
         console.log("没有运行中的后台进程");
-        process.exit(1);
+        break;
       }
 
-      const pid = parseInt(readFileSync(pidPath, "utf-8").trim(), 10);
-      try {
-        process.kill(pid, "SIGTERM");
-        unlinkSync(pidPath);
-        console.log(`\x1b[32m✓\x1b[0m 已停止后台进程 (PID: ${pid})`);
-      } catch {
-        unlinkSync(pidPath);
-        console.log("进程已不存在，已清理 PID 文件");
+      let killed = 0;
+      for (const pid of targets) {
+        if (killProcessTree(pid)) {
+          killed++;
+          console.log(`\x1b[32m✓\x1b[0m 已停止后台进程 (PID: ${pid})`);
+        } else {
+          console.log(`\x1b[33m⚠\x1b[0m PID ${pid} 无法停止（可能已退出）`);
+        }
+      }
+      if (existsSync(pidPath)) unlinkSync(pidPath);
+      if (killed > 1) {
+        console.log(`\x1b[36mℹ\x1b[0m 共清理 ${killed} 个进程（含遗留的孤儿进程）`);
       }
       break;
     }
@@ -605,6 +703,24 @@ async function main() {
     }
 
     default: {
+      // Reject duplicate launches: applies to ANY startup method (foreground
+      // `node dist/cli.js`, desktop .bat, or `skychat-ai start`). Without this,
+      // a desktop launcher that fails to kill the previous instance produces
+      // multiple daemons racing on the same WeChat account.
+      //
+      // Daemon children (spawned by `skychat-ai start`) skip this check via
+      // WAI_DAEMON=1, since their parent cli process is still alive for a few
+      // ms during the spawn handoff and would falsely trip the detector.
+      if (process.env.WAI_DAEMON !== "1") {
+        const livePids = findSkychatPids();
+        if (livePids.length > 0) {
+          console.error(`\x1b[31m✗\x1b[0m 已有 SkyChat 进程在运行 (PID: ${livePids.join(", ")})`);
+          console.error(`  请先停止: skychat-ai stop`);
+          console.error(`  或双击桌面「停止SkyChat-AI.bat」`);
+          process.exit(1);
+        }
+      }
+
       // Auto-update check
       await autoUpdate(VERSION);
 

@@ -25,6 +25,7 @@ const log = createLogger("网关");
 
 const DEBOUNCE_MS = 1500;
 const DEBOUNCE_MEDIA_MS = 4000;
+const DEDUP_WINDOW_MS = 60_000;
 
 interface MessageBuffer {
   messages: InboundMessage[];
@@ -41,6 +42,8 @@ export class Gateway {
   private processing = new Set<string>();
   // Queue for messages that arrive while AI is processing
   private queues = new Map<string, InboundMessage[]>();
+  // Last message per sender for exact-duplicate dedup
+  private lastMessages = new Map<string, { text: string; time: number }>();
   // Per-message provider override (from @model syntax)
   private atProviders = new Map<string, string>();
   // Middleware stack
@@ -100,7 +103,7 @@ export class Gateway {
     for (const [name, provConfig] of Object.entries(this.config.providers)) {
       switch (provConfig.type) {
         case "claude-agent":
-          this.providers.set(name, new ClaudeAgentProvider(provConfig));
+          this.providers.set(name, new ClaudeAgentProvider(provConfig, this.config.memoryDir));
           break;
         case "claw-agent":
           this.providers.set(name, new ClawAgentProvider(name, provConfig));
@@ -205,13 +208,43 @@ export class Gateway {
 
     const key = `${msg.channel}:${msg.senderId}`;
 
+    // Exact-duplicate dedup: drop identical messages from same sender within window
+    const lastMsg = this.lastMessages.get(key);
+    if (lastMsg) {
+      const ageMs = Date.now() - lastMsg.time;
+      if (msg.text === lastMsg.text && ageMs < DEDUP_WINDOW_MS) {
+        log.info(`重复消息已忽略 (${Math.round(ageMs / 1000)}s 内同内容, msgLen=${msg.text.length}): ${msg.text.slice(0, 40)}`);
+        return;
+      }
+      // 诊断: 文本"几乎相同"却没去重时输出差异 (帮助定位空格/换行/附加内容)
+      if (ageMs < DEDUP_WINDOW_MS && Math.abs(msg.text.length - lastMsg.text.length) <= 8) {
+        const a = msg.text;
+        const b = lastMsg.text;
+        if (a !== b) {
+          let prefix = 0;
+          while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++;
+          const aTail = JSON.stringify(a.slice(Math.max(0, prefix - 5)));
+          const bTail = JSON.stringify(b.slice(Math.max(0, prefix - 5)));
+          log.warn(`dedup 未命中但内容相近 (age=${ageMs}ms, lenA=${a.length} lenB=${b.length}, 共同前缀=${prefix}): cur=${aTail} prev=${bTail}`);
+        }
+      }
+    }
+    this.lastMessages.set(key, { text: msg.text, time: Date.now() });
+
     // If AI is processing, queue the message
     if (this.processing.has(key)) {
       const queue = this.queues.get(key) || [];
       queue.push(msg);
       this.queues.set(key, queue);
-      log.info(`消息已排队 (AI处理中), 队列长度: ${queue.length}`);
+      log.info(`消息已排队 (AI处理中), 队列长度: ${queue.length}, msgLen=${msg.text.length}`);
       return;
+    }
+
+    // Diagnostic: 同 key 已在 debounce buffer 中却收到了"内容不同"的消息会被合并;
+    // 若收到的是"完全相同"的消息，说明 dedup 没命中（疑似 bug 路径），单独标注
+    const existingBuf = this.buffers.get(key);
+    if (existingBuf && existingBuf.messages.some((m) => m.text === msg.text)) {
+      log.warn(`同内容消息已在 debounce buffer 中 (buffer 大小=${existingBuf.messages.length}, msgLen=${msg.text.length}): ${msg.text.slice(0, 40)}`);
     }
 
     // Debounce: accumulate messages within time window
@@ -235,6 +268,8 @@ export class Gateway {
     const buf = this.buffers.get(key);
     if (!buf || buf.messages.length === 0) return;
     this.buffers.delete(key);
+
+    log.info(`flushBuffer ${key} 条数=${buf.messages.length}${buf.messages.length > 1 ? ` 长度=[${buf.messages.map((m) => m.text.length).join(",")}]` : ""}`);
 
     // Merge all buffered messages into one
     const merged = this.mergeMessages(buf.messages);
@@ -414,6 +449,18 @@ export class Gateway {
           ? ` [intent标签: open=${hasOpenTag} close=${hasCloseTag}]`
           : "";
         log.info(`[INTENT] 未检测到意图，正常回复 (${ctx.response.length} chars)${tagHint}  preview="${preview}${ctx.response.length > 200 ? "…" : ""}"`);
+
+        // Claude 输出了 intent 标签但 JSON 损坏导致没解析出来 → 它前文常常说"正在帮你发布..."
+        // 这是 systemPrompt 规则违反 + 用户视角的谎报. 直接覆盖回复, 给用户准确错误信息.
+        if (hasOpenTag && hasCloseTag) {
+          log.warn(`[INTENT] 拦截 Claude 谎报: intent JSON 解析失败但 Claude 在回复中暗示已发布. 替换为明确错误提示.`);
+          await channel.send({
+            targetId: msg.senderId,
+            text: "⚠️ AI 生成的发布指令格式有误（JSON 解析失败），任务未入队。请稍后重试或换个 URL。",
+            replyToken: msg.replyToken,
+          });
+          return;
+        }
       }
 
       // Send response if available
@@ -531,6 +578,110 @@ export class Gateway {
 
     return dataUrl ? { dataUrl, text } : null;
   }
+
+  // ── RedInk 小红书图文生成 ──────────────────────────────────────────────────
+  private readonly REDINK_BASE = "http://127.0.0.1:12398/api";
+
+  private async generateRedinkContent(
+    topic: string,
+    onProgress: (msg: string) => Promise<void>,
+  ): Promise<{ imagePaths: string[]; textContent: string }> {
+    // 1. 生成大纲
+    const outlineRes = await fetch(`${this.REDINK_BASE}/outline`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic }),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    if (!outlineRes.ok) {
+      throw new Error(`大纲生成失败 HTTP ${outlineRes.status}`);
+    }
+    const outlineData = await outlineRes.json() as {
+      success: boolean;
+      outline: string;
+      pages: Array<{ index: number; type: string; content: string }>;
+      error?: string;
+    };
+    if (!outlineData.success) {
+      throw new Error(`大纲生成失败: ${outlineData.error}`);
+    }
+
+    const allPages = outlineData.pages;
+    const pageCount = allPages.length;
+    await onProgress(`大纲已生成（共 ${pageCount} 页），生成封面图片中...`);
+
+    // 2. 只生成封面图（第1页），其余页面内容整合为文字
+    const coverPage = allPages.slice(0, 1);
+    const taskId = `skychat_${Date.now()}`;
+    const genRes = await fetch(`${this.REDINK_BASE}/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pages: coverPage,
+        task_id: taskId,
+        full_outline: outlineData.outline,
+        user_topic: topic,
+      }),
+      signal: AbortSignal.timeout(300_000),
+    });
+
+    if (!genRes.ok || !genRes.body) {
+      throw new Error(`图片生成请求失败 HTTP ${genRes.status}`);
+    }
+
+    // 消费 SSE 流，收集完成的图片文件路径
+    const { join } = await import("path");
+
+    const completedPaths: string[] = [];
+    const reader = genRes.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let currentEvent = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (line.startsWith("event: ")) {
+          currentEvent = line.slice(7).trim();
+        } else if (line.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+            if (currentEvent === "complete" && data.index !== undefined) {
+              const filePath = join(
+                "D:\\AIWorkSpace\\temp\\redBook",
+                taskId,
+                `${data.index}.png`,
+              );
+              completedPaths.push(filePath);
+            }
+            if (currentEvent === "finish") {
+              log.info(`[RedInk] 任务完成: 成功=${data.completed} 失败=${data.failed}`);
+            }
+          } catch {
+            // ignore malformed SSE line
+          }
+        }
+      }
+    }
+
+    // 3. 将其余页面内容整合为文字
+    const textParts: string[] = [];
+    for (const page of allPages.slice(1)) {
+      if (page.content) {
+        textParts.push(page.content);
+      }
+    }
+    const textContent = textParts.join("\n\n");
+
+    return { imagePaths: completedPaths, textContent };
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   private async compose(ctx: Context, stack: Middleware[]): Promise<void> {
     let index = -1;
@@ -827,6 +978,71 @@ export class Gateway {
         break;
       }
 
+      case "/小红书":
+      case "/redink": {
+        const topic = msg.text.slice(cmd.length).trim();
+        if (!topic) {
+          await channel.send({
+            targetId: msg.senderId,
+            text: "用法: /小红书 <主题>\n例如: /小红书 春日野餐攻略",
+            replyToken: msg.replyToken,
+          });
+          break;
+        }
+
+        await channel.send({
+          targetId: msg.senderId,
+          text: `正在为「${topic}」生成小红书图文，请稍候...`,
+          replyToken: msg.replyToken,
+        });
+
+        try {
+          const { imagePaths, textContent } = await this.generateRedinkContent(
+            topic,
+            async (progressMsg) => {
+              await channel.send({ targetId: msg.senderId, text: progressMsg });
+            },
+          );
+
+          // 发送封面图
+          const { readFile } = await import("fs/promises");
+          if (imagePaths.length > 0) {
+            try {
+              const imgBuf = await readFile(imagePaths[0]!);
+              const dataUrl = `data:image/jpeg;base64,${imgBuf.toString("base64")}`;
+              await channel.send({
+                targetId: msg.senderId,
+                text: "",
+                media: [{ type: "image", url: dataUrl }],
+              });
+            } catch (e) {
+              log.warn(`[RedInk] 读取封面图失败: ${imagePaths[0]} - ${e}`);
+            }
+          }
+
+          // 发送文字内容
+          if (textContent) {
+            await channel.send({
+              targetId: msg.senderId,
+              text: textContent,
+            });
+          }
+
+          await channel.send({
+            targetId: msg.senderId,
+            text: `✅ 图文生成完成`,
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          log.error(`[RedInk] 生成失败: ${errMsg}`);
+          await channel.send({
+            targetId: msg.senderId,
+            text: `生成失败: ${errMsg}`,
+          });
+        }
+        break;
+      }
+
       case "/help": {
         await channel.send({
           targetId: msg.senderId,
@@ -836,6 +1052,7 @@ export class Gateway {
             "/model vendor/model - 第三方模型",
             "/skill [名称] - 切换技能 (off 关闭)",
             "/画 <描述> - AI生成图片",
+            "/小红书 <主题> - 生成小红书图文（多张图）",
             "/help - 显示帮助",
             "/ping - 检查状态",
             "/id - 查看我的用户ID",

@@ -121,39 +121,62 @@ function findTrailingJsonObject(text: string): string | null {
 }
 
 /**
- * 修复 Claude 生成 JSON 时常见的失误：字符串里直接放了真实换行 / 制表符，
- * 而不是 `\n` / `\t` 转义。这会让 `JSON.parse` 报 "Bad control character"。
- * 只转义字符串内部、未经 `\\` 转义的控制字符；其它字符原样保留。
+ * 修复 Claude 生成 JSON 时常见的失误。处理三类错误:
+ *   1. 字符串内未转义的控制字符 (换行/制表符 → \n/\t)
+ *   2. 字符串内的反斜杠后接非法转义字符 (\xxx → \\xxx, 如路径 D:\AI 应该是 D:\\AI)
+ *   3. 字符串内意外的双引号 (下一个非空白字符不是 ,/}/]/:) → 转义为 \"
+ * 只在字符串状态内修复; 字符串外原样保留。
  */
 function sanitizeJsonControlChars(raw: string): string {
   let result = "";
   let inString = false;
-  let escape = false;
-  for (let i = 0; i < raw.length; i++) {
+  let i = 0;
+  const len = raw.length;
+  while (i < len) {
     const ch = raw[i] ?? "";
-    if (escape) {
-      result += ch;
-      escape = false;
-      continue;
+    if (!inString) {
+      if (ch === '"') { inString = true; result += ch; i++; continue; }
+      result += ch; i++; continue;
     }
+    // 字符串内
     if (ch === "\\") {
-      result += ch;
-      escape = true;
+      const next = raw[i + 1] ?? "";
+      // JSON 合法转义: " \ / b f n r t u
+      if (/[\"\\\/bfnrtu]/.test(next)) {
+        result += ch + next;
+        i += 2;
+      } else {
+        // 非法转义 (如 Windows 路径 D:\AIWorkSpace) → 自动转义反斜杠
+        result += "\\\\" + next;
+        i += 2;
+      }
       continue;
     }
     if (ch === '"') {
-      inString = !inString;
-      result += ch;
+      // 判定: 这是合法的字符串闭引号还是字符串内的意外引号?
+      // 看下一个非空白字符: 是 , } ] : 之一 → 合法结束; 否则是字符串内的 "
+      let j = i + 1;
+      while (j < len && /\s/.test(raw[j] ?? "")) j++;
+      const nextNonSpace = raw[j] ?? "";
+      if (nextNonSpace === "," || nextNonSpace === "}" || nextNonSpace === "]" || nextNonSpace === ":" || j >= len) {
+        inString = false;
+        result += ch;
+        i++;
+        continue;
+      }
+      // 字符串内意外的 ", 自动转义
+      result += '\\"';
+      i++;
       continue;
     }
-    if (inString) {
-      if (ch === "\n") { result += "\\n"; continue; }
-      if (ch === "\r") { result += "\\r"; continue; }
-      if (ch === "\t") { result += "\\t"; continue; }
-      if (ch === "\b") { result += "\\b"; continue; }
-      if (ch === "\f") { result += "\\f"; continue; }
-    }
+    // 控制字符
+    if (ch === "\n") { result += "\\n"; i++; continue; }
+    if (ch === "\r") { result += "\\r"; i++; continue; }
+    if (ch === "\t") { result += "\\t"; i++; continue; }
+    if (ch === "\b") { result += "\\b"; i++; continue; }
+    if (ch === "\f") { result += "\\f"; i++; continue; }
     result += ch;
+    i++;
   }
   return result;
 }
@@ -163,20 +186,18 @@ function parseIntentBlock(rawBlock: string, source: string): ExtractedIntent | n
   try {
     parsed = JSON.parse(rawBlock);
   } catch (firstErr) {
-    // 兜底：Claude 偶发在字符串内放真实换行/制表符，先转义再解析一次
+    // 兜底: sanitize 处理控制字符 / 非法反斜杠 / 字符串内未转义引号
     const sanitized = sanitizeJsonControlChars(rawBlock);
-    if (sanitized !== rawBlock) {
-      try {
-        parsed = JSON.parse(sanitized);
-        log.info(`intent JSON 控制字符已自动修复 (${source})`);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        log.warn(`intent JSON 解析失败 (${source}, 已尝试控制字符修复): ${errMsg}  raw="${rawBlock.slice(0, 200)}"`);
-        return null;
+    try {
+      parsed = JSON.parse(sanitized);
+      if (sanitized !== rawBlock) {
+        log.info(`intent JSON 已自动修复 (${source}, ${rawBlock.length - sanitized.length === 0 ? "等长" : `+${sanitized.length - rawBlock.length}字符`})`);
       }
-    } else {
-      const errMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
-      log.warn(`intent JSON 解析失败 (${source}): ${errMsg}  raw="${rawBlock.slice(0, 200)}"`);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      // 完整 raw 写入日志便于诊断 (老问题: Intent JSON 偶发损坏)
+      log.warn(`intent JSON 解析失败 (${source}): 原错=${firstMsg}; 修复后错=${errMsg}  rawLen=${rawBlock.length}  raw=${rawBlock.slice(0, 1500)}${rawBlock.length > 1500 ? "...[truncated]" : ""}`);
       return null;
     }
   }

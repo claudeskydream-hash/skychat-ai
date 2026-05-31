@@ -148,6 +148,23 @@ export class ClaudeAgentProvider implements Provider {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log.error(`Claude query failed [${Date.now() - queryStart}ms, ${msgCount}条消息]: ${errMsg}  msgTypes=${JSON.stringify(msgTypeCounts)}`);
+
+      // 错误分两类：
+      //   A. server 明确告知 session 失效 → 清掉旧 session 用新会话重试 (恢复)
+      //   B. 纯认证错误 (403 / Failed to authenticate) → 不要清 session 重试
+      //      因为根因通常是 Claude CLI 凭证问题，新会话也会 403,
+      //      之前的逻辑反而把唯一能用的旧 session 也清掉，越救越坏 (2026-05-26 事故).
+      const isSessionInvalid = /invalid.*session|session.*not found|session.*expired/i.test(errMsg);
+      const isAuthError = /403|Failed to authenticate|Request not allowed/i.test(errMsg);
+      if (existingSession && isSessionInvalid) {
+        log.warn(`session 已失效 (${errMsg.slice(0, 80)}), 清除后以新会话重试...`);
+        this.sessions.delete(sessionId);
+        this.persistSessions();
+        return this.query(prompt, sessionId, options);
+      }
+      if (isAuthError) {
+        log.warn(`认证失败 (${existingSession ? "resume" : "新会话"}): 通常是 Claude CLI 凭证 / OAuth token 过期。不清 session, 请人工 \`claude login\` 或检查 ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN`);
+      }
       throw err;
     }
 

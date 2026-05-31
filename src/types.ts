@@ -189,6 +189,14 @@ export interface WaiConfig {
   /** Global system prompt */
   systemPrompt?: string;
 
+  /**
+   * Permanent memory directory for agent-type providers.
+   * Used as the fixed working directory (cwd) so the Claude Agent SDK
+   * always operates from a stable location, and as the storage location
+   * for the persistent session index (sessions.json).
+   */
+  memoryDir?: string;
+
   /** Message chunk size limit */
   chunkSize?: number;
 

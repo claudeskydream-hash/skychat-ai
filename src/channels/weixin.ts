@@ -343,7 +343,9 @@ export class WeixinChannel implements Channel {
             const mediaInfo = content.media.length > 0
               ? ` +${content.media.map((m) => m.type).join(",")}`
               : "";
-            log.info(`收到消息 [${maskId(msg.from_user_id)}]: ${content.text.slice(0, 50)}${mediaInfo}`);
+            const msgId = String(msg.message_id || msg.seq || "?");
+            const textLen = content.text.length;
+            log.info(`收到消息 [${maskId(msg.from_user_id)}] msgId=${msgId} len=${textLen}: ${content.text.slice(0, 80)}${textLen > 80 ? "…" : ""}${mediaInfo}`);
             // Save context_token for startup greeting
             if (msg.context_token && msg.from_user_id) {
               this.lastTokens.set(msg.from_user_id, msg.context_token);
