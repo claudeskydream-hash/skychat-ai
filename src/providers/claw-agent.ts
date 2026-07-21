@@ -47,7 +47,8 @@ function createCrossPlatformBashTool(cwd: string) {
           { cwd, timeout: BASH_TIMEOUT, maxBuffer: 1024 * 1024, env: { ...process.env } },
           (error, stdout, stderr) => {
             if (error) {
-              const msg = (error as NodeJS.ErrnoException).killed
+              const wasKilled = "killed" in error && error.killed === true;
+              const msg = wasKilled
                 ? `Command timed out after ${BASH_TIMEOUT}ms`
                 : error.message;
               resolve(stderr ? `Error: ${msg}\nStderr: ${stderr}` : `Error: ${msg}`);
@@ -115,7 +116,8 @@ function createSummarizeUrlTool(cwd: string) {
           { cwd, timeout: SUMMARIZE_TIMEOUT, maxBuffer: 4 * 1024 * 1024, env },
           (error, stdout, stderr) => {
             if (error && !stdout) {
-              const msg = (error as NodeJS.ErrnoException).killed
+              const wasKilled = "killed" in error && error.killed === true;
+              const msg = wasKilled
                 ? `Command timed out after ${SUMMARIZE_TIMEOUT}ms`
                 : error.message;
               resolve(`Error: ${msg}${stderr ? `\nStderr: ${stderr.slice(0, 500)}` : ""}`);

@@ -20,6 +20,7 @@ import { transcribeFromUrl } from "./asr.js";
 import { textToSpeech } from "./tts.js";
 import { Worker, extractIntent, stripIntentBlock } from "./worker/index.js";
 import { ensureSchedulerTasks } from "./scheduler.js";
+import { WebhookServer } from "./webhook.js";
 
 const log = createLogger("网关");
 
@@ -63,6 +64,8 @@ export class Gateway {
   private mcp = new McpManager();
   // Worker module for serialized chrome-MCP operations
   private worker: Worker;
+  // Local HTTP webhook for external outbound messages
+  private webhook: WebhookServer;
 
   constructor(config: WaiConfig) {
     this.config = config;
@@ -71,6 +74,7 @@ export class Gateway {
       if (!ch) return Promise.resolve();
       return ch.send({ targetId, text, replyToken });
     });
+    this.webhook = new WebhookServer(config, (name) => this.channels.get(name));
   }
 
   /** Register a middleware function */
@@ -149,6 +153,8 @@ export class Gateway {
       log.warn(`调度器初始化失败: ${err instanceof Error ? err.message : err}`),
     );
 
+    this.webhook.start();
+
     // Prompt for saved sessions before starting channels
     if (!process.env.WAI_DAEMON) {
       await this.promptSavedSessions();
@@ -166,6 +172,7 @@ export class Gateway {
 
   async stop(): Promise<void> {
     log.info("正在关闭...");
+    await this.webhook.stop();
     await this.worker.shutdown();
     await this.mcp.disconnect();
     const stops = [...this.channels.values()].map((ch) => ch.stop());

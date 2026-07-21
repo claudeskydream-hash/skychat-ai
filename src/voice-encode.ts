@@ -7,7 +7,7 @@
  * 需要系统已安装 ffmpeg。
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("voice-encode");
@@ -91,9 +91,9 @@ function ffmpegToPcm(audio: Buffer): Promise<Buffer> {
       "pipe:1",
     ];
 
-    let ff;
+    let ff: ChildProcessWithoutNullStreams;
     try {
-      ff = spawn("ffmpeg", args, { windowsHide: true });
+      ff = spawn("ffmpeg", args, { windowsHide: true, stdio: "pipe" });
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === "ENOENT") return reject(new FfmpegMissingError());

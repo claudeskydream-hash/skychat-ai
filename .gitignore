@@ -4,3 +4,6 @@ dist/
 .env
 .wai/
 send-*.mjs
+*.log
+*.local.json
+memory.md

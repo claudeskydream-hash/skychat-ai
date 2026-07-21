@@ -220,6 +220,15 @@ export interface WaiConfig {
     voice?: string;
     maxChars?: number;
   };
+
+  /** Local HTTP webhook for sending outbound messages from external tools */
+  webhook?: {
+    enabled?: boolean;
+    host?: string;
+    port?: number;
+    secret?: string;
+    allowNoAuth?: boolean;
+  };
 }
 
 export interface ProviderConfig {

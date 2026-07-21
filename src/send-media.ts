@@ -11,6 +11,7 @@ import { join, basename } from "node:path";
 import { randomBytes, randomUUID, createHash, createCipheriv } from "node:crypto";
 import { getAccountsDir } from "./config.js";
 import { encodeToSilk, type SilkAudio } from "./voice-encode.js";
+import { createLogger } from "./logger.js";
 
 // ── 常量 ──
 
@@ -19,6 +20,7 @@ const CHANNEL_VERSION = "2.1.6";
 const ILINK_APP_ID = "bot";
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (1 << 8) | 6; // 131334
 const API_TIMEOUT_MS = 15_000;
+const log = createLogger("send-media");
 
 const UploadMediaType = { IMAGE: 1, VIDEO: 2, FILE: 3, VOICE: 4 } as const;
 const MessageItemType = { TEXT: 1, IMAGE: 2, VOICE: 3, FILE: 4, VIDEO: 5 } as const;
@@ -42,12 +44,16 @@ export interface SendMediaOptions {
   filePath: string;
   /** 目标微信用户 ID */
   toUserId: string;
+  /** 可选的微信 context_token，用于需要会话上下文的媒体类型 */
+  replyToken?: string;
   /** 媒体类型：auto 自动检测，或手动指定 image/video/voice/file */
   mediaType?: "auto" | "image" | "video" | "voice" | "file";
   /** 可选文字说明 */
   caption?: string;
   /** 进度回调 */
   onProgress?: (stage: string) => void;
+  /** 链路追踪 ID；不传则自动生成 */
+  traceId?: string;
 }
 
 export interface SendMediaResult {
@@ -56,6 +62,19 @@ export interface SendMediaResult {
   mediaType: string;
   fileSize: number;
   error?: string;
+  upload?: UploadedMediaInfo;
+}
+
+export interface UploadedMediaInfo {
+  filePath: string;
+  fileName: string;
+  mediaType: "图片" | "视频" | "语音" | "文件";
+  fileSize: number;
+  fileSizeCiphertext: number;
+  filekey: string;
+  downloadEncryptedQueryParam: string;
+  aeskey: string;
+  cdnDownloadUrl: string;
 }
 
 // ── AES-ECB 辅助 ──
@@ -106,6 +125,25 @@ function mediaTypeLabel(type: number): string {
   }
 }
 
+function mediaTypeName(type: number): UploadedMediaInfo["mediaType"] {
+  return mediaTypeLabel(type) as UploadedMediaInfo["mediaType"];
+}
+
+function newTraceId(): string {
+  return randomUUID().slice(0, 8);
+}
+
+function emit(traceId: string, message: string, onProgress?: (stage: string) => void): void {
+  const line = `[media:${traceId}] ${message}`;
+  log.info(line);
+  onProgress?.(line);
+}
+
+function summarizeParam(value?: string): string {
+  if (!value) return "none";
+  return `${value.slice(0, 8)}…${value.slice(-8)} len=${value.length}`;
+}
+
 // ── 账号管理 ──
 
 /** 加载微信账号 */
@@ -141,6 +179,85 @@ export function getKnownUsers(): string[] {
   } catch {
     return [];
   }
+}
+
+/** 上传单个媒体文件到微信 CDN，但不发送微信消息。 */
+export async function uploadMediaToCdn(options: {
+  filePath: string;
+  toUserId: string;
+  mediaType?: "auto" | "image" | "video" | "voice" | "file";
+  onProgress?: (stage: string) => void;
+  traceId?: string;
+}): Promise<UploadedMediaInfo> {
+  const { filePath, toUserId, onProgress } = options;
+  const traceId = options.traceId || newTraceId();
+  const account = loadWeixinAccount();
+
+  if (!existsSync(filePath)) {
+    throw new Error(`文件不存在: ${filePath}`);
+  }
+
+  let mediaType = detectMediaType(filePath);
+  if (options.mediaType && options.mediaType !== "auto") {
+    const typeMap: Record<string, number> = {
+      image: UploadMediaType.IMAGE,
+      video: UploadMediaType.VIDEO,
+      voice: UploadMediaType.VOICE,
+      file: UploadMediaType.FILE,
+    };
+    mediaType = typeMap[options.mediaType] ?? UploadMediaType.FILE;
+  }
+
+  const plaintext = await readFile(filePath);
+  const rawsize = plaintext.length;
+  const rawfilemd5 = createHash("md5").update(plaintext).digest("hex");
+  const filesize = aesEcbPaddedSize(rawsize);
+  const filekey = randomBytes(16).toString("hex");
+  const aeskey = randomBytes(16);
+
+  emit(
+    traceId,
+    `upload-only start file="${filePath}" type=${mediaTypeLabel(mediaType)} target=${maskId(toUserId)} raw=${rawsize} padded=${filesize}`,
+    onProgress,
+  );
+  emit(traceId, "getuploadurl request", onProgress);
+  const uploadUrlResp = await getUploadUrl(account, {
+    filekey,
+    mediaType,
+    toUserId,
+    rawsize,
+    rawfilemd5,
+    filesize,
+    aeskey: aeskey.toString("hex"),
+  });
+
+  emit(
+    traceId,
+    `getuploadurl ok fullUrl=${uploadUrlResp.upload_full_url ? "yes" : "no"} uploadParam=${summarizeParam(uploadUrlResp.upload_param)}`,
+    onProgress,
+  );
+  emit(traceId, `cdn upload start size=${filesize} (${(filesize / 1024 / 1024).toFixed(2)} MB)`, onProgress);
+  const downloadParam = await uploadBufferToCdn(
+    plaintext,
+    uploadUrlResp.upload_full_url,
+    uploadUrlResp.upload_param,
+    filekey,
+    aeskey,
+    mediaTypeLabel(mediaType),
+  );
+  emit(traceId, `cdn upload ok downloadParam=${summarizeParam(downloadParam)}`, onProgress);
+
+  return {
+    filePath,
+    fileName: basename(filePath),
+    mediaType: mediaTypeName(mediaType),
+    fileSize: rawsize,
+    fileSizeCiphertext: filesize,
+    filekey,
+    downloadEncryptedQueryParam: downloadParam,
+    aeskey: aeskey.toString("hex"),
+    cdnDownloadUrl: `${CDN_BASE_URL}/download?encrypted_query_param=${encodeURIComponent(downloadParam)}`,
+  };
 }
 
 // ── 微信 API 调用 ──
@@ -249,20 +366,26 @@ async function sendMediaMessage(
   fileName: string,
   caption?: string,
   voiceDurationMs?: number,
+  replyToken?: string,
+  traceId = newTraceId(),
+  onProgress?: (stage: string) => void,
 ): Promise<void> {
   // 先发送文字说明
   if (caption?.trim()) {
-    await weixinApi(account, "ilink/bot/sendmessage", {
+    emit(traceId, `send caption len=${caption.trim().length} replyToken=${replyToken ? "yes" : "no"}`, onProgress);
+    const captionRes = await weixinApi(account, "ilink/bot/sendmessage", {
       msg: {
         from_user_id: "",
         to_user_id: toUserId,
         client_id: generateClientId(),
         message_type: 2,
         message_state: 2,
+        context_token: replyToken || undefined,
         item_list: [{ type: MessageItemType.TEXT, text_item: { text: caption.trim() } }],
       },
       base_info: { channel_version: CHANNEL_VERSION },
     }, { timeout: API_TIMEOUT_MS });
+    emit(traceId, `send caption result ret=${captionRes.ret ?? 0} errmsg=${captionRes.errmsg || ""}`, onProgress);
   }
 
   // 构建媒体消息体
@@ -330,6 +453,11 @@ async function sendMediaMessage(
       break;
   }
 
+  emit(
+    traceId,
+    `send media item=${mediaTypeLabel(mediaType)} file="${fileName}" size=${uploadResult.fileSize} padded=${uploadResult.fileSizeCiphertext} downloadParam=${summarizeParam(uploadResult.downloadParam)} replyToken=${replyToken ? "yes" : "no"}`,
+    onProgress,
+  );
   const res = await weixinApi(account, "ilink/bot/sendmessage", {
     msg: {
       from_user_id: "",
@@ -337,11 +465,13 @@ async function sendMediaMessage(
       client_id: generateClientId(),
       message_type: 2,
       message_state: 2,
+      context_token: replyToken || undefined,
       item_list: [item],
     },
     base_info: { channel_version: CHANNEL_VERSION },
   }, { timeout: API_TIMEOUT_MS });
 
+  emit(traceId, `send media result ret=${res.ret ?? 0} errmsg=${res.errmsg || ""}`, onProgress);
   if (res.ret && res.ret !== 0) {
     throw new Error(`发送失败: ${res.errmsg || JSON.stringify(res)}`);
   }
@@ -351,11 +481,12 @@ async function sendMediaMessage(
 
 /** 发送单个媒体文件到微信 */
 export async function sendMedia(options: SendMediaOptions): Promise<SendMediaResult> {
-  const { filePath, toUserId, caption, onProgress } = options;
+  const { filePath, toUserId, caption, onProgress, replyToken } = options;
+  const traceId = options.traceId || newTraceId();
 
   try {
     // 加载账号
-    onProgress?.("加载微信账号...");
+    emit(traceId, "load weixin account", onProgress);
     const account = loadWeixinAccount();
 
     // 验证文件
@@ -378,18 +509,22 @@ export async function sendMedia(options: SendMediaOptions): Promise<SendMediaRes
     // 读取文件
     const stat = await import("node:fs/promises").then(m => m.stat(filePath));
     const fileSize = stat.size;
-    onProgress?.(`读取文件 (${(fileSize / 1024 / 1024).toFixed(2)} MB)...`);
+    emit(
+      traceId,
+      `read file="${filePath}" requestedType=${options.mediaType || "auto"} resolvedType=${mediaTypeLabel(mediaType)} size=${fileSize} (${(fileSize / 1024 / 1024).toFixed(2)} MB) replyToken=${replyToken ? "yes" : "no"}`,
+      onProgress,
+    );
     const originalBuffer = await readFile(filePath);
     let buffer = originalBuffer;
 
     if (fileSize > 25 * 1024 * 1024) {
-      onProgress?.(`⚠️ 文件较大 (${(fileSize / 1024 / 1024).toFixed(1)} MB)，上传可能需要一些时间...`);
+      emit(traceId, `large file warning size=${(fileSize / 1024 / 1024).toFixed(1)} MB`, onProgress);
     }
 
     // 语音：先转 SILK_V3（微信 CDN 拒收 mp3/wav/aac 等非 silk 格式）
     let voiceDurationMs: number | undefined;
     if (mediaType === UploadMediaType.VOICE) {
-      onProgress?.("转码为 SILK_V3...");
+      emit(traceId, "voice transcode start SILK_V3", onProgress);
       const silk: SilkAudio | null = await encodeToSilk(buffer);
       if (!silk) {
         return {
@@ -399,7 +534,7 @@ export async function sendMedia(options: SendMediaOptions): Promise<SendMediaRes
       }
       buffer = silk.data;
       voiceDurationMs = silk.duration;
-      onProgress?.(`SILK 编码完成 (${(buffer.length / 1024).toFixed(1)} KB, ${(silk.duration / 1000).toFixed(1)}s)`);
+      emit(traceId, `voice transcode ok size=${buffer.length} durationMs=${silk.duration}`, onProgress);
     }
 
     // 单次"上传 + 发消息"流程
@@ -414,22 +549,32 @@ export async function sendMedia(options: SendMediaOptions): Promise<SendMediaRes
       const filekey = randomBytes(16).toString("hex");
       const aeskey = randomBytes(16);
 
-      onProgress?.("获取上传地址...");
+      emit(
+        traceId,
+        `getuploadurl request type=${mediaTypeLabel(mt)} raw=${rawsize} padded=${filesize} md5=${rawfilemd5.slice(0, 8)}…`,
+        onProgress,
+      );
       const uploadUrlResp = await getUploadUrl(account, {
         filekey, mediaType: mt, toUserId, rawsize, rawfilemd5, filesize,
         aeskey: aeskey.toString("hex"),
       });
 
-      onProgress?.(`上传到 CDN (${(filesize / 1024 / 1024).toFixed(2)} MB)...`);
+      emit(
+        traceId,
+        `getuploadurl ok fullUrl=${uploadUrlResp.upload_full_url ? "yes" : "no"} uploadParam=${summarizeParam(uploadUrlResp.upload_param)}`,
+        onProgress,
+      );
+      emit(traceId, `cdn upload start size=${filesize} (${(filesize / 1024 / 1024).toFixed(2)} MB)`, onProgress);
       const downloadParam = await uploadBufferToCdn(
         payload, uploadUrlResp.upload_full_url, uploadUrlResp.upload_param,
         filekey, aeskey, mediaTypeLabel(mt),
       );
+      emit(traceId, `cdn upload ok downloadParam=${summarizeParam(downloadParam)}`, onProgress);
 
-      onProgress?.("发送消息...");
+      emit(traceId, "sendmessage start", onProgress);
       await sendMediaMessage(account, toUserId, {
         filekey, downloadParam, aeskey, fileSize: rawsize, fileSizeCiphertext: filesize,
-      }, mt, basename(filePath), caption, durMs);
+      }, mt, basename(filePath), caption, durMs, replyToken, traceId, onProgress);
 
       return rawsize;
     };
@@ -445,16 +590,17 @@ export async function sendMedia(options: SendMediaOptions): Promise<SendMediaRes
         && /-5102019|CDN 上传失败 500/.test(msg);
       if (!isVoiceBlocked) throw err;
 
-      onProgress?.("⚠️ 微信 Bot 平台拒收语音 (-5102019)，自动降级为文件发送...");
+      emit(traceId, "voice blocked by platform, fallback to file", onProgress);
       finalMediaType = UploadMediaType.FILE;
       sentBytes = await uploadAndSend(originalBuffer, UploadMediaType.FILE, undefined);
     }
 
-    onProgress?.(`✓ ${mediaTypeLabel(finalMediaType)}已发送 → ${maskId(toUserId)} (${(sentBytes / 1024 / 1024).toFixed(2)} MB)`);
+    emit(traceId, `send complete type=${mediaTypeLabel(finalMediaType)} target=${maskId(toUserId)} bytes=${sentBytes}`, onProgress);
 
     return { success: true, filePath, mediaType: mediaTypeLabel(finalMediaType), fileSize: sentBytes };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
+    emit(traceId, `send failed error=${errorMsg}`, onProgress);
     return { success: false, filePath, mediaType: mediaTypeLabel(detectMediaType(filePath)), fileSize: 0, error: errorMsg };
   }
 }

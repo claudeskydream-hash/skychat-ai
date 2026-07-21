@@ -1,14 +1,16 @@
 import { spawn } from "node:child_process";
-import path from "node:path";
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { WorkerTask, WorkerCtx, WorkerResult } from "../types.js";
 
 const SCRIPT_PATH = "C:\\Users\\Administrator\\.claude\\skills\\post-to-xhs\\scripts\\publish_pipeline.py";
 
-// RedInk 本地后端 — 图片链接不可达时用它生成 1 张封面图兜底.
-const REDINK_BASE_URL = process.env.REDINK_BASE_URL || "http://127.0.0.1:12398";
-const REDINK_HISTORY_DIR = process.env.REDINK_HISTORY_DIR
-  || "D:\\AIWorkSpace\\GitHubTools\\RedInk\\history";
-const REDINK_GEN_TIMEOUT_MS = 120_000;
+// 截图兜底 — 图片链接不可达时用 Playwright 截图作为封面.
+const SCREENSHOT_DIR = process.env.SKYCHAT_TEMP_DIR || "D:\\AIWorkSpace\\temp";
+const PYTHON_EXE = process.env.PYTHON_EXE || "python";
+const SCREENSHOT_TIMEOUT_MS = 45_000;
 const XHS_TITLE_LIMIT = 38;
 const XHS_CONTENT_LIMIT = 1000;
 
@@ -104,105 +106,74 @@ async function probeImageUrl(url: string): Promise<{ ok: true } | { ok: false; r
 }
 
 /**
- * 调 RedInk SSE 流生成 1 张封面图作为兜底.
+ * Playwright 截图作为封面兜底.
  *
  * 返回本地图片绝对路径, 失败返回 null.
  *
- * RedInk 把图存到 history/<task_id>/<filename>; 我们用 publish_pipeline 能直接读的本地路径回填.
+ * 每次调用写入独立临时文件，避免并发任务互相覆盖。
  */
-async function generateFallbackCover(
-  title: string,
-  content: string,
+async function takeScreenshotFallback(
+  imageUrls: string[],
   taskId: string,
   log: WorkerCtx["log"],
 ): Promise<string | null> {
-  const redinkTaskId = `xhs_fallback_${taskId}`;
-  const payload = {
-    task_id: redinkTaskId,
-    user_topic: title,
-    full_outline: "",
-    pages: [
-      {
-        index: 0,
-        type: "cover",
-        // content 字段是生图 prompt: 标题 + 正文摘要, 提供风格语境
-        content: `${title}\n\n${content.slice(0, 240)}`,
-      },
-    ],
-  };
+  // 从 OG 图 URL 推断源网页 URL
+  let pageUrl = imageUrls[0] ?? "";
+  const ghMatch = pageUrl.match(/opengraph\.githubassets\.com\/\d+\/([^/?]+\/[^/?]+)/);
+  if (ghMatch) pageUrl = "https://github.com/" + ghMatch[1];
+  const hfMatch = pageUrl.match(/huggingface\.co\/([^/]+\/[^/?#]+)/);
+  if (hfMatch) pageUrl = "https://huggingface.co/" + hfMatch[1];
 
-  let resp: Response;
-  const t0 = Date.now();
-  try {
-    resp = await fetch(`${REDINK_BASE_URL}/api/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify(payload), // Node fetch 默认 UTF-8 编码
-      signal: AbortSignal.timeout(REDINK_GEN_TIMEOUT_MS),
+  const safeTaskId = taskId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const screenshotPath = join(SCREENSHOT_DIR, `xhs-fallback-${safeTaskId}-${randomUUID().slice(0, 8)}.png`);
+  await mkdir(SCREENSHOT_DIR, { recursive: true });
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  const browserArgs = proxyUrl ? [`--proxy-server=${proxyUrl}`] : [];
+  const script = [
+    "from playwright.sync_api import sync_playwright",
+    "import time",
+    "with sync_playwright() as p:",
+    `    browser = p.chromium.launch(headless=True, args=${JSON.stringify(browserArgs)})`,
+    "    page = browser.new_page(viewport={'width': 1280, 'height': 800})",
+    `    page.goto(${JSON.stringify(pageUrl)}, wait_until="domcontentloaded", timeout=30000)`,
+    "    time.sleep(3)",
+    `    page.screenshot(path=${JSON.stringify(screenshotPath)}, full_page=False)`,
+    "    browser.close()",
+    "    print('SCREENSHOT_OK')",
+  ].join("\n");
+
+  return new Promise((resolve) => {
+    const proc = spawn(PYTHON_EXE, ["-c", script]);
+    let out = "";
+    let settled = false;
+    const finish = (result: string | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+    proc.stderr?.on("data", (d: Buffer) => { out += d.toString(); });
+    const timer = setTimeout(() => {
+      proc.kill();
+      log.warn(`截图兜底超时 (${SCREENSHOT_TIMEOUT_MS}ms)`);
+      finish(null);
+    }, SCREENSHOT_TIMEOUT_MS);
+    proc.on("error", (error) => {
+      clearTimeout(timer);
+      log.warn(`截图兜底无法启动: ${error.message}`);
+      finish(null);
     });
-  } catch (e) {
-    log.warn(`RedInk 请求失败: ${e instanceof Error ? e.message : String(e)}`);
-    return null;
-  }
-  if (!resp.ok || !resp.body) {
-    log.warn(`RedInk 返回 HTTP ${resp.status}`);
-    return null;
-  }
-
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let imageFilename: string | null = null;
-  let lastErrorMsg: string | null = null;
-
-  // SSE 解析: 每个事件块以空行 "\n\n" 分隔; 每行格式 "event: X" / "data: {...}".
-  outer: while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    while (true) {
-      const sep = buffer.indexOf("\n\n");
-      if (sep < 0) break;
-      const block = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-
-      let evt = "";
-      let dataStr = "";
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event:")) evt = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataStr = line.slice(5).trim();
+    proc.on("close", (code: number | null) => {
+      clearTimeout(timer);
+      if (out.includes("SCREENSHOT_OK") && existsSync(screenshotPath)) {
+        log.info("截图兜底成功: " + screenshotPath);
+        finish(screenshotPath);
+      } else {
+        log.warn("截图兜底失败 (exit " + code + "): " + out.slice(0, 200));
+        finish(null);
       }
-      if (!evt || !dataStr) continue;
-      let data: any;
-      try { data = JSON.parse(dataStr); } catch { continue; }
-
-      if (evt === "image") {
-        // 单张图完成 — 优先这条事件携带的 filename
-        const fn = data.filename || data.file || (Array.isArray(data.images) ? data.images[0] : null);
-        if (fn) {
-          imageFilename = fn;
-          break outer;
-        }
-      } else if (evt === "error") {
-        lastErrorMsg = data.message || data.error || "unknown";
-      } else if (evt === "finish" || evt === "complete") {
-        // 流结束 — 兜底再看 images[0]
-        if (!imageFilename && Array.isArray(data.images) && data.images.length > 0) {
-          imageFilename = data.images[0];
-        }
-        break outer;
-      }
-    }
-  }
-  try { reader.releaseLock(); } catch { /* ignore */ }
-
-  if (!imageFilename) {
-    log.warn(`RedInk 生图未返回图片 (${Date.now() - t0}ms): ${lastErrorMsg ?? "无图返回"}`);
-    return null;
-  }
-  const absPath = path.join(REDINK_HISTORY_DIR, redinkTaskId, imageFilename);
-  log.info(`RedInk 封面已生成 (${Date.now() - t0}ms): ${absPath}`);
-  return absPath;
+    });
+  });
 }
 
 export interface PostXhsParams {
@@ -228,7 +199,7 @@ export async function handlePostXhs(
   const { log } = ctx;
   const params = task.params as unknown as PostXhsParams;
   const { title, content, videoPath, videoUrl, account } = params;
-  // 图片来源可能被 RedInk fallback 替换, 故 let 而非 const
+  // 图片来源可能被截图兜底替换, 故 let 而非 const
   let imageUrls = params.imageUrls;
   let imagePaths = params.imagePaths;
   const headless = params.headless !== false; // 默认 headless
@@ -247,7 +218,7 @@ export async function handlePostXhs(
   // Pre-check image URLs before starting Chrome to fail fast on 404s.
   // 跨境 CDN (raw.githubusercontent.com 等) 单次 HEAD 8s 容易抖动 fail (2026-05-26 实测一次过/一次超时).
   // 策略: HEAD 短超时 → 失败时 GET Range 0-0 长超时兜底 → 仍失败才判 INVALID.
-  // 任意一张 URL 不可达 → 切到 RedInk 生 1 张封面图兜底 (publish_pipeline 不支持 URL+本地混用).
+  // 任意一张 URL 不可达 → Playwright 截图兜底 (publish_pipeline 不支持 URL+本地混用).
   if (imageUrls?.length) {
     let anyFailed: { url: string; reason: string } | null = null;
     for (const url of imageUrls) {
@@ -258,18 +229,18 @@ export async function handlePostXhs(
       }
     }
     if (anyFailed) {
-      log.warn(`图片不可达, 调 RedInk 生封面兜底 (${anyFailed.reason}): ${anyFailed.url}`);
-      const fallback = await generateFallbackCover(title, content, task.id, log);
+      log.warn(`图片不可达, 用 Playwright 截图兜底 (${anyFailed.reason}): ${anyFailed.url}`);
+      const fallback = await takeScreenshotFallback(imageUrls, task.id, log);
       if (!fallback) {
         return {
           ok: false,
           reason: "IMAGE_URL_INVALID",
-          userMessage: `❌ 发小红书失败：图片链接不可达, RedInk 生图兜底也失败了\n原始: ${anyFailed.reason}: ${anyFailed.url}`,
+          userMessage: `❌ 发小红书失败：图片链接不可达且截图兜底也失败了\n原始: ${anyFailed.reason}: ${anyFailed.url}`,
         };
       }
       imageUrls = undefined;
       imagePaths = [fallback];
-      log.info(`已切换到 RedInk 生成的封面图: ${fallback}`);
+      log.info(`已切换到 Playwright 截图封面: ${fallback}`);
     }
   }
 

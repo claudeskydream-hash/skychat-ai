@@ -19,7 +19,8 @@
     "dev": "tsup --watch",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check src/",
+    "lint": "biome lint src/",
+    "format": "biome format --write src/",
     "clean": "rm -rf dist"
   },
   "files": [
@@ -59,6 +60,7 @@
     "socks-proxy-agent": "^10.0.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.4",
     "@types/node": "^22.0.0",
     "tsup": "^8.4.0",
     "typescript": "^5.7.0"

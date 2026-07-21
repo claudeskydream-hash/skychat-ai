@@ -16,6 +16,7 @@ const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-
 const VERSION = pkg.version as string;
 
 const log = createLogger("cli");
+const ANSI_SGR_RE = new RegExp("\\u001b\\[[0-9;]*m", "g");
 
 const HELP = `
   \x1b[1mskychat-ai\x1b[0m — WeChat AI Bot
@@ -77,7 +78,7 @@ function printBanner(defaultProvider: string): void {
   const empty = `  ${b}│${c.reset}${" ".repeat(inner)}${b}│${c.reset}`;
 
   const displayWidth = (s: string) => {
-    const stripped = s.replace(/\x1b\[[0-9;]*m/g, "");
+    const stripped = s.replace(ANSI_SGR_RE, "");
     let w = 0;
     for (const ch of stripped) {
       const code = ch.codePointAt(0)!;

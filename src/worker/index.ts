@@ -95,15 +95,15 @@ function findTrailingJsonObject(text: string): string | null {
 
   let depth = 0;
   let inString = false;
-  let escape = false;
+  let isEscaped = false;
   for (let i = trimmed.length - 1; i >= 0; i--) {
     const ch = trimmed[i];
-    if (escape) {
-      escape = false;
+    if (isEscaped) {
+      isEscaped = false;
       continue;
     }
     if (ch === "\\") {
-      escape = true;
+      isEscaped = true;
       continue;
     }
     if (ch === '"') {

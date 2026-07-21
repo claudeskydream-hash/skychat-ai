@@ -10,6 +10,7 @@ let currentLevel: Level = "info";
 let _logDir: string | null = null;
 let _logFilePath: string | null = null;
 let _logFileDate: string | null = null;
+const ANSI_SGR_RE = new RegExp("\\u001b\\[[0-9;]*m", "g");
 
 /**
  * Enable file logging. Creates the directory if it does not exist.
@@ -33,8 +34,7 @@ function getLogFile(): string | null {
 }
 
 function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, "");
+  return s.replace(ANSI_SGR_RE, "");
 }
 
 function appendToFile(line: string): void {
