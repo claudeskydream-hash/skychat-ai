@@ -266,6 +266,21 @@ async function main() {
   // 让 Node 内置 fetch / undici 自动识别 HTTP_PROXY / HTTPS_PROXY / NO_PROXY env.
   // 同时把 globalThis.fetch 强制替换为 undici.fetch (避免被 node-fetch polyfill 接管).
   const proxyLog = createLogger("startup");
+  // undici's EnvHttpProxyAgent only treats NO_PROXY entries beginning with
+  // "." or "*" as subdomain matches.  A bare "weixin.qq.com" therefore does
+  // not exclude ilinkai.weixin.qq.com / the WeChat CDN and can make the bot's
+  // message polling depend on an unrelated outbound proxy.
+  if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
+    const configuredNoProxy = process.env.no_proxy ?? process.env.NO_PROXY ?? "";
+    const entries = configuredNoProxy.split(/[\s,]+/).filter(Boolean);
+    const lowerEntries = new Set(entries.map((entry) => entry.toLowerCase()));
+    for (const host of ["weixin.qq.com", ".weixin.qq.com"]) {
+      if (!lowerEntries.has(host)) entries.push(host);
+    }
+    const noProxy = entries.join(",");
+    process.env.NO_PROXY = noProxy;
+    process.env.no_proxy = noProxy;
+  }
   proxyLog.warn(`[PROXY DIAG] HTTPS_PROXY=${process.env.HTTPS_PROXY ?? "<unset>"}, HTTP_PROXY=${process.env.HTTP_PROXY ?? "<unset>"}, NO_PROXY=${process.env.NO_PROXY ?? "<unset>"}`);
   if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
     try {

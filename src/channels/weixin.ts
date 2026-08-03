@@ -267,8 +267,8 @@ export class WeixinChannel implements Channel {
       log.warn("尚未配置任何模型的 API Key");
     }
 
-    // Send startup greeting to known users (with saved tokens)
-    // Fresh scan: no tokens, greeting + guide will be sent on first message
+    // Send a startup greeting when a persisted conversation token is still valid.
+    // If it has expired, the channel stays online and will greet on the next message.
     await this.sendStartupGreeting();
 
     while (this.running) {
@@ -327,7 +327,7 @@ export class WeixinChannel implements Channel {
                 }
 
                 log.debug(`下载媒体 type=${m.type}, aeskey=${aeskey ? "有" : "无"}`);
-                const dataUrl = await this.downloadMedia("", aeskey, encryptParam);
+                const dataUrl = await this.downloadMedia("", aeskey, encryptParam, m.type);
                 if (dataUrl) {
                   m.url = dataUrl;
                   resolvedMedia.push(m);
@@ -357,8 +357,8 @@ export class WeixinChannel implements Channel {
               await this.maybeSendGreetingAndGuide(msg.from_user_id, msg.context_token);
             }
 
-            // Persist inbound images to local files so the bot model can reference them by path
-            const persistedPaths = await persistImagesToFiles(content.media);
+            // Persist all inbound media to local files so the bot model can reference them by path.
+            const persistedPaths = await persistInboundMediaToFiles(content.media);
             let inboundText = content.text;
             if (persistedPaths.length > 0) {
               inboundText += `\n\n[附带媒体文件]\n${persistedPaths.map((p) => `- ${p}`).join("\n")}`;
@@ -523,7 +523,7 @@ export class WeixinChannel implements Channel {
       );
 
       if (res.ret && res.ret !== 0) {
-        log.error(`发送失败: ret=${res.ret} ${res.errmsg || JSON.stringify(res)}`);
+        throw new Error(`发送失败: ret=${res.ret} ${res.errmsg || JSON.stringify(res)}`);
       } else {
         log.info(`文本已发送 (${chunk.length} 字符) → ${maskId(msg.targetId)}`);
       }
@@ -934,8 +934,13 @@ export class WeixinChannel implements Channel {
     }, { timeout: 50_000 });
   }
 
-  /** Download media from WeChat CDN, decrypt, and return as base64 data URL */
-  async downloadMedia(_mediaId: string, aeskey?: string, encryptParam?: string): Promise<string | null> {
+  /** Download media from WeChat CDN, decrypt, and return as a correctly typed base64 data URL. */
+  async downloadMedia(
+    _mediaId: string,
+    aeskey?: string,
+    encryptParam?: string,
+    mediaType?: MediaAttachment["type"],
+  ): Promise<string | null> {
     if (!encryptParam) {
       log.warn("媒体缺少 encrypt_query_param，无法下载");
       return null;
@@ -983,8 +988,9 @@ export class WeixinChannel implements Channel {
         }
       }
 
-      // Detect content type from magic bytes
-      const contentType = detectImageType(buffer);
+      // Do not label every download as an image: that makes audio/video/files
+      // impossible to persist with the right extension after they are downloaded.
+      const contentType = detectMediaType(buffer, mediaType);
       const base64 = buffer.toString("base64");
       return `data:${contentType};base64,${base64}`;
     } catch (err) {
@@ -1265,7 +1271,7 @@ export class WeixinChannel implements Channel {
       if (!this.startupGreetingSent) {
         await this.send({
           targetId: userId,
-          text: "Hey! I'm back online and ready to chat. Send me a message anytime! 👋",
+          text: "你好，我是你的skychat机器人！",
           replyToken: token,
         });
         this.startupGreetingSent = true;
@@ -1301,35 +1307,33 @@ export class WeixinChannel implements Channel {
     }
   }
 
+  /**
+   * Greet known users after a successful channel startup. A saved context token
+   * can expire while the bot is offline, so a failed greeting is non-fatal and
+   * the next inbound message will provide a fresh token.
+   */
   private async sendStartupGreeting(): Promise<void> {
     if (this.lastTokens.size === 0) {
-      log.debug("无已保存的用户 token，跳过启动问候 (用户发消息时会补发指南)");
+      log.debug("无已保存的用户 token，跳过启动问候");
       return;
     }
 
-    const greeting = "Hey! I'm back online and ready to chat. Send me a message anytime! 👋";
-    const guideSent = await this.loadGuideSent();
+    const greeting = "你好，我是你的skychat机器人！";
+    let greetingSent = false;
     log.debug(`发送启动问候给 ${this.lastTokens.size} 个用户...`);
 
     for (const [userId, token] of this.lastTokens) {
       try {
         await this.send({ targetId: userId, text: greeting, replyToken: token });
-        // Send model setup hint or normal guide
-        if (!guideSent.has(userId)) {
-          await new Promise((r) => setTimeout(r, 500));
-          const text = this.noModelConfigured ? this.getModelSetupHint() : this.getGuideText();
-          await this.send({ targetId: userId, text, replyToken: token });
-          guideSent.add(userId);
-          this.guideSentCache.add(userId);
-        }
-        log.debug(`已问候 ${maskId(userId)}`);
-      } catch {
-        log.warn(`问候失败 ${maskId(userId)} (token 可能过期)`);
+        greetingSent = true;
+        log.info(`已发送启动问候 → ${maskId(userId)}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn(`启动问候未发送 ${maskId(userId)}（会话 token 可能过期）：${message}`);
       }
     }
 
-    await this.saveGuideSent(guideSent);
-    this.startupGreetingSent = true;
+    this.startupGreetingSent = greetingSent;
   }
 
   // ── Last token persistence ──
@@ -1379,35 +1383,63 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function detectImageType(buf: Buffer): string {
+function detectMediaType(buf: Buffer, fallbackType?: MediaAttachment["type"]): string {
   if (buf[0] === 0xff && buf[1] === 0xd8) return "image/jpeg";
   if (buf[0] === 0x89 && buf[1] === 0x50) return "image/png";
   if (buf[0] === 0x47 && buf[1] === 0x49) return "image/gif";
   if (buf[0] === 0x52 && buf[1] === 0x49) return "image/webp";
-  return "image/jpeg"; // default
+  if (buf.subarray(0, 4).toString("ascii") === "%PDF") return "application/pdf";
+  if (buf.subarray(0, 3).toString("ascii") === "ID3" || (buf[0] === 0xff && ((buf[1] ?? 0) & 0xe0) === 0xe0)) return "audio/mpeg";
+  if (buf.subarray(0, 4).toString("ascii") === "OggS") return "audio/ogg";
+  if (buf.subarray(0, 4).toString("ascii") === "fLaC") return "audio/flac";
+  if (buf.subarray(0, 9).toString("ascii") === "#!SILK_V3") return "audio/silk";
+  if (buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WAVE") return "audio/wav";
+  if (buf.subarray(4, 8).toString("ascii") === "ftyp") return "video/mp4";
+  if (buf.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) return "application/zip";
+  if (buf.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return fallbackType === "video" ? "video/webm" : "application/octet-stream";
+  if (fallbackType === "video") return "video/mp4";
+  if (fallbackType === "voice") return "audio/silk";
+  return "application/octet-stream";
 }
 
-/** Persist inbound image data-URLs to local files; returns absolute paths */
-async function persistImagesToFiles(media: MediaAttachment[]): Promise<string[]> {
+function extensionForMedia(mime: string, fileName?: string): string {
+  const suppliedExt = fileName?.match(/\.([a-z0-9]{1,16})$/i)?.[1];
+  if (suppliedExt) return suppliedExt.toLowerCase();
+  const extensions: Record<string, string> = {
+    "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
+    "audio/mpeg": "mp3", "audio/ogg": "ogg", "audio/flac": "flac", "audio/wav": "wav", "audio/silk": "silk",
+    "video/mp4": "mp4", "video/webm": "webm", "application/pdf": "pdf", "application/zip": "zip",
+  };
+  return extensions[mime] || "bin";
+}
+
+function safeFileName(fileName: string | undefined): string | undefined {
+  const name = fileName?.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim();
+  return name || undefined;
+}
+
+/** Persist all inbound media data URLs to local files; returns absolute paths. */
+async function persistInboundMediaToFiles(media: MediaAttachment[]): Promise<string[]> {
   const paths: string[] = [];
-  const imageItems = media.filter((m) => m.type === "image" && m.url?.startsWith("data:"));
-  if (imageItems.length === 0) return paths;
+  const mediaItems = media.filter((m) => m.url?.startsWith("data:"));
+  if (mediaItems.length === 0) return paths;
 
   try {
     await ensureDir(INBOUND_DIR);
-    for (const m of imageItems) {
+    for (const m of mediaItems) {
       const match = m.url!.match(/^data:([^;]+);base64,(.+)$/s);
       if (!match) continue;
       const mime = match[1]!;
-      const ext = mime.includes("png") ? "png" : mime.includes("gif") ? "gif" : mime.includes("webp") ? "webp" : "jpg";
-      const filename = `wx_inbound_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
+      const ext = extensionForMedia(mime, m.fileName);
+      const suppliedName = safeFileName(m.fileName);
+      const filename = `wx_inbound_${Date.now()}_${randomBytes(4).toString("hex")}_${suppliedName || `${m.type}.${ext}`}`;
       const fullPath = join(INBOUND_DIR, filename);
       await writeFile(fullPath, Buffer.from(match[2]!, "base64"));
       paths.push(fullPath);
-      log.debug(`已落盘图片: ${fullPath}`);
+      log.debug(`已落盘媒体 type=${m.type}: ${fullPath}`);
     }
   } catch (err) {
-    log.warn(`图片落盘失败: ${err instanceof Error ? err.message : err}`);
+    log.warn(`媒体落盘失败: ${err instanceof Error ? err.message : err}`);
   }
 
   return paths;
