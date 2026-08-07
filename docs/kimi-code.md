@@ -17,14 +17,19 @@ Add or update these fields in `~/.skychat-ai/config.json`:
       "type": "claw-agent",
       "baseUrl": "https://api.kimi.com/coding/v1",
       "model": "kimi-for-coding",
-      "apiKeyEnv": "MOONSHOT_API_KEY"
+      "credentialFile": "~/.kimi-code/credentials/kimi-code.json",
+      "credentialField": "access_token",
+      "authRefreshCommand": "~/.kimi-code/bin/kimi.exe",
+      "authRefreshArgs": ["--prompt", "Reply with OK only."],
+      "maxAuthRetries": 3
     }
   }
 }
 ```
 
-Set `MOONSHOT_API_KEY` in the environment that starts SkyChat. Do not commit
-access tokens or files from `~/.kimi-code/credentials`.
+On a 401 authentication response, SkyChat runs the configured refresh command,
+reloads `access_token`, and retries up to three times. Do not commit access
+tokens or files from `~/.kimi-code/credentials`.
 
 For persistent memory behavior, customize `systemPrompt` to tell the agent
 which Markdown files to read and when it should update them. Tool operations

@@ -1,4 +1,7 @@
 import { execFile } from "child_process";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { agent } from "claw-agent-sdk";
 import { createLogger } from "../logger.js";
 import type { Provider, ProviderConfig, ProviderOptions, ProviderResponse } from "../types.js";
@@ -20,6 +23,18 @@ const BLOCKED_PATTERNS = [
 const isWindows = process.platform === "win32";
 const SHELL_BIN = isWindows ? (process.env.ComSpec || "cmd.exe") : "/bin/sh";
 const BASH_TIMEOUT = 30_000;
+const AUTH_REFRESH_TIMEOUT = 60_000;
+
+function expandHome(path: string): string {
+  return path === "~" ? homedir() : path.startsWith("~/") || path.startsWith("~\\")
+    ? resolve(homedir(), path.slice(2))
+    : path;
+}
+
+function isAuthenticationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b401\b|invalid_authentication_error|api key.*(?:invalid|expired)/i.test(message);
+}
 
 function createCrossPlatformBashTool(cwd: string) {
   return {
@@ -150,16 +165,48 @@ export class ClawAgentProvider implements Provider {
     this.memoryDir = memoryDir;
   }
 
+  private async resolveApiKey(): Promise<string> {
+    const credentialFile = this.config.credentialFile as string | undefined;
+    if (credentialFile) {
+      const field = (this.config.credentialField as string | undefined) || "access_token";
+      const credentials = JSON.parse(await readFile(expandHome(credentialFile), "utf8")) as Record<string, unknown>;
+      const token = credentials[field];
+      if (typeof token === "string" && token.length > 0) return token;
+      throw new Error(`${this.name}: credential field "${field}" is empty`);
+    }
+    return this.config.apiKey || process.env[(this.config.apiKeyEnv as string) || ""] || "";
+  }
+
+  private async refreshAuthentication(attempt: number): Promise<void> {
+    const command = this.config.authRefreshCommand as string | undefined;
+    if (!command) {
+      throw new Error(`${this.name}: authentication expired and authRefreshCommand is not configured`);
+    }
+    const args = (this.config.authRefreshArgs as string[] | undefined) || [];
+    log.warn(`认证失败，正在刷新凭据并重试 (${attempt})...`);
+    await new Promise<void>((resolvePromise, reject) => {
+      execFile(
+        expandHome(command),
+        args,
+        {
+          cwd: this.memoryDir || process.cwd(),
+          timeout: AUTH_REFRESH_TIMEOUT,
+          maxBuffer: 1024 * 1024,
+          env: { ...process.env },
+        },
+        (error) => {
+          if (error) reject(new Error(`${this.name}: credential refresh failed: ${error.message}`));
+          else resolvePromise();
+        },
+      );
+    });
+  }
+
   async query(
     prompt: string,
     sessionId: string,
     options?: ProviderOptions,
   ): Promise<string> {
-    const apiKey = this.config.apiKey || process.env[(this.config.apiKeyEnv as string) || ""] || "";
-    if (!apiKey) {
-      throw new Error(`${this.name}: API Key 未设置`);
-    }
-
     const model = options?.model || (this.config.model as string);
     log.info(`Querying ${this.name} (model: ${model}, session: ${sessionId.slice(0, 8)}...)`);
 
@@ -173,24 +220,37 @@ export class ClawAgentProvider implements Provider {
       };
     }
 
-    // 每次 query 创建新 agent 以确保最新配置
+    const maxAuthRetries = Math.max(0, Math.min(3, Number(this.config.maxAuthRetries ?? 3)));
     const cwd = options?.cwd || this.memoryDir || process.cwd();
-    const ai = agent({
-      provider: {
-        baseUrl: this.config.baseUrl as string,
-        apiKey,
-        model,
-      },
-      tools: SAFE_BUILTIN_TOOLS,
-      extraTools: [createCrossPlatformBashTool(cwd), createSummarizeUrlTool(cwd)],
-      maxTurns: 10,
-      maxTokens: (options?.maxTokens as number) || (this.config.maxTokens as number) || 4096,
-      systemPrompt: options?.systemPrompt || (this.config.systemPrompt as string) || undefined,
-      cwd,
-    });
-
-    const result = await ai.run(prompt);
-    if (originalFetch) global.fetch = originalFetch;
+    let result;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        const apiKey = await this.resolveApiKey();
+        if (!apiKey) throw new Error(`${this.name}: API Key 未设置`);
+        const ai = agent({
+          provider: {
+            baseUrl: this.config.baseUrl as string,
+            apiKey,
+            model,
+          },
+          tools: SAFE_BUILTIN_TOOLS,
+          extraTools: [createCrossPlatformBashTool(cwd), createSummarizeUrlTool(cwd)],
+          maxTurns: 10,
+          maxTokens: (options?.maxTokens as number) || (this.config.maxTokens as number) || 4096,
+          systemPrompt: options?.systemPrompt || (this.config.systemPrompt as string) || undefined,
+          cwd,
+        });
+        try {
+          result = await ai.run(prompt);
+          break;
+        } catch (error) {
+          if (!isAuthenticationError(error) || attempt >= maxAuthRetries) throw error;
+          await this.refreshAuthentication(attempt + 1);
+        }
+      }
+    } finally {
+      if (originalFetch) global.fetch = originalFetch;
+    }
 
     // 打印工具调用日志
     for (const step of result.steps) {
@@ -210,7 +270,7 @@ export class ClawAgentProvider implements Provider {
     sessionId: string,
     options?: ProviderOptions,
   ): AsyncIterable<ProviderResponse> {
-    const apiKey = this.config.apiKey || process.env[(this.config.apiKeyEnv as string) || ""] || "";
+    const apiKey = await this.resolveApiKey();
     if (!apiKey) {
       throw new Error(`${this.name}: API Key 未设置`);
     }
