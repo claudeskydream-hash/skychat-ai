@@ -40,6 +40,25 @@ function frontmatterValue(frontmatter: string, key: string): string | undefined 
   return value.replace(/^["']|["']$/g, "");
 }
 
+function frontmatterTriggers(frontmatter: string): string[] {
+  const triggers = new Set<string>();
+  const inline = frontmatter.match(/^\s*trigger:\s*(.+)$/mi)?.[1];
+  if (inline) {
+    for (const item of inline.split(/[,，]/)) {
+      const trigger = item.trim().replace(/^["']|["']$/g, "");
+      if (trigger) triggers.add(trigger);
+    }
+  }
+  const block = frontmatter.match(/^triggers:\s*\r?\n((?:[ \t]+-[^\r\n]*(?:\r?\n|$))+)/mi)?.[1];
+  if (block) {
+    for (const match of block.matchAll(/^[ \t]+-\s*(.+)$/gm)) {
+      const trigger = match[1]!.trim().replace(/^["']|["']$/g, "");
+      if (trigger) triggers.add(trigger);
+    }
+  }
+  return [...triggers];
+}
+
 async function loadExternalSkills(config: WaiConfig): Promise<void> {
   if (!config.skillDirectories?.length) return;
   const skills = { ...(config.skills || {}) };
@@ -63,6 +82,10 @@ async function loadExternalSkills(config: WaiConfig): Promise<void> {
       const description = frontmatterValue(frontmatter, "description")
         || content.match(/^#\s+(.+)$/m)?.[1]
         || fallbackName;
+      const triggers = frontmatterTriggers(frontmatter);
+      const whenToUse = frontmatterValue(frontmatter, "whenToUse")
+        || frontmatterValue(frontmatter, "when-to-use")
+        || frontmatterValue(frontmatter, "when_to_use");
       const skillRoot = dirname(path);
       const systemPrompt = [
         `You are using the external skill "${name}".`,
@@ -72,7 +95,13 @@ async function loadExternalSkills(config: WaiConfig): Promise<void> {
         "",
         content,
       ].join("\n");
-      skills[name] = { description, systemPrompt, externalPath: path } satisfies SkillConfig;
+      skills[name] = {
+        description,
+        systemPrompt,
+        externalPath: path,
+        triggers,
+        whenToUse,
+      } satisfies SkillConfig;
     }
   }
   config.skills = skills;

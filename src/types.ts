@@ -162,6 +162,10 @@ export interface SkillConfig {
   systemPrompt: string;
   /** Provider override (optional, falls back to user's current provider) */
   provider?: string;
+  /** Keywords that automatically activate this skill for a single message */
+  triggers?: string[];
+  /** Human-readable automatic invocation guidance from SKILL.md */
+  whenToUse?: string;
   /** Absolute SKILL.md path for dynamically loaded external skills */
   externalPath?: string;
 }

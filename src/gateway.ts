@@ -334,16 +334,27 @@ export class Gateway {
         }
       }
 
-      // Resolve skill overrides
-      const activeSkillName = this.config.userSkills?.[msg.senderId];
-      const activeSkill = activeSkillName ? this.config.skills?.[activeSkillName] : undefined;
+      // Resolve manual skill override, otherwise auto-activate matching external
+      // skills for this message. Multiple skills may cooperate (for example,
+      // post-to-xhs + wechat-send).
+      const manualSkillName = this.config.userSkills?.[msg.senderId];
+      const configuredSkills = this.config.skills || {};
+      const activeSkills = manualSkillName
+        ? [[manualSkillName, configuredSkills[manualSkillName]] as const].filter((entry) => !!entry[1])
+        : Object.entries(configuredSkills)
+          .filter(([, skill]) => skill.triggers?.some((trigger) =>
+            trigger.length >= 2 && msg.text.toLowerCase().includes(trigger.toLowerCase())))
+          .slice(0, 3);
+      if (!manualSkillName && activeSkills.length > 0) {
+        log.info(`自动触发技能: ${activeSkills.map(([name]) => name).join(", ")}`);
+      }
 
       // Check for @model override (consumed once)
       const atProvider = this.atProviders.get(key);
       if (atProvider) this.atProviders.delete(key);
 
       let providerName = atProvider
-        || activeSkill?.provider
+        || activeSkills.find(([, skill]) => skill?.provider)?.[1]?.provider
         || this.config.userRoutes?.[msg.senderId]
         || this.config.defaultProvider;
 
@@ -399,8 +410,13 @@ export class Gateway {
           options.model = modelOverride;
         }
 
-        // Skill system prompt takes priority over global
-        let systemPrompt = activeSkill?.systemPrompt || this.config.systemPrompt;
+        // Manual/auto-selected skills are provider-independent and may cooperate.
+        let systemPrompt = activeSkills.length > 0
+          ? [
+            this.config.systemPrompt || "",
+            ...activeSkills.map(([, skill]) => skill!.systemPrompt),
+          ].filter(Boolean).join("\n\n")
+          : this.config.systemPrompt;
         // Voice mode: ask AI to be concise for TTS
         if (isVoiceInput && this.config.tts?.provider !== "disabled") {
           systemPrompt = (systemPrompt || "") + "\n\n[语音模式] 用户通过语音提问，请用简短口语化的方式回答，控制在200字以内。不要使用 markdown 格式、列表或代码块。";
