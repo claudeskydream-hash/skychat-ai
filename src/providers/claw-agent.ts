@@ -142,10 +142,12 @@ function createSummarizeUrlTool(cwd: string) {
 export class ClawAgentProvider implements Provider {
   readonly name: string;
   private config: ProviderConfig;
+  private memoryDir?: string;
 
-  constructor(name: string, config: ProviderConfig) {
+  constructor(name: string, config: ProviderConfig, memoryDir?: string) {
     this.name = name;
     this.config = config;
+    this.memoryDir = memoryDir;
   }
 
   async query(
@@ -172,7 +174,7 @@ export class ClawAgentProvider implements Provider {
     }
 
     // 每次 query 创建新 agent 以确保最新配置
-    const cwd = options?.cwd || process.cwd();
+    const cwd = options?.cwd || this.memoryDir || process.cwd();
     const ai = agent({
       provider: {
         baseUrl: this.config.baseUrl as string,
@@ -226,7 +228,7 @@ export class ClawAgentProvider implements Provider {
       };
     }
 
-    const cwd = options?.cwd || process.cwd();
+    const cwd = options?.cwd || this.memoryDir || process.cwd();
     const ai = agent({
       provider: {
         baseUrl: this.config.baseUrl as string,

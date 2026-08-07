@@ -110,7 +110,7 @@ export class Gateway {
           this.providers.set(name, new ClaudeAgentProvider(provConfig, this.config.memoryDir));
           break;
         case "claw-agent":
-          this.providers.set(name, new ClawAgentProvider(name, provConfig));
+          this.providers.set(name, new ClawAgentProvider(name, provConfig, this.config.memoryDir));
           break;
         case "openai-compatible":
           this.providers.set(name, new OpenAICompatibleProvider(name, provConfig));
