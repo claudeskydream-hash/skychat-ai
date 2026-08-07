@@ -1,11 +1,82 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import type { WaiConfig } from "./types.js";
+import { basename, dirname, join, resolve } from "node:path";
+import type { SkillConfig, WaiConfig } from "./types.js";
 
 const WAI_DIR = join(homedir(), ".skychat-ai");
 const CONFIG_PATH = join(WAI_DIR, "config.json");
+
+function expandHome(path: string): string {
+  return path === "~" ? homedir() : path.startsWith("~/") || path.startsWith("~\\")
+    ? resolve(homedir(), path.slice(2))
+    : resolve(path);
+}
+
+async function findSkillFiles(root: string, depth = 0): Promise<string[]> {
+  if (depth > 4) return [];
+  const entries = await readdir(root, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await findSkillFiles(path, depth + 1));
+    } else if (/^skill\.md$/i.test(entry.name)) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
+function frontmatterValue(frontmatter: string, key: string): string | undefined {
+  const line = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "mi"));
+  if (!line) return undefined;
+  const value = line[1]!.trim();
+  if (value === "|" || value === ">") {
+    const start = line.index! + line[0].length;
+    const block = frontmatter.slice(start).match(/^(?:\r?\n[ \t]+[^\r\n]*)+/)?.[0];
+    return block?.replace(/^\r?\n[ \t]+/gm, " ").trim();
+  }
+  return value.replace(/^["']|["']$/g, "");
+}
+
+async function loadExternalSkills(config: WaiConfig): Promise<void> {
+  if (!config.skillDirectories?.length) return;
+  const skills = { ...(config.skills || {}) };
+  for (const configuredDir of config.skillDirectories) {
+    const root = expandHome(configuredDir);
+    if (!existsSync(root)) {
+      console.warn(`\x1b[33m⚠\x1b[0m 技能目录不存在: ${root}`);
+      continue;
+    }
+    for (const path of (await findSkillFiles(root)).sort()) {
+      const content = await readFile(path, "utf8");
+      const frontmatter = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/)?.[1] || "";
+      const fallbackName = basename(dirname(path));
+      const name = (frontmatterValue(frontmatter, "slug")
+        || frontmatterValue(frontmatter, "name")
+        || fallbackName)
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "-");
+      if (!name || skills[name]) continue;
+      const description = frontmatterValue(frontmatter, "description")
+        || content.match(/^#\s+(.+)$/m)?.[1]
+        || fallbackName;
+      const skillRoot = dirname(path);
+      const systemPrompt = [
+        `You are using the external skill "${name}".`,
+        `Skill root: ${skillRoot}`,
+        "Follow the skill instructions below. Resolve every relative file or script path against the skill root.",
+        "Use only tools available in the current provider; if a named tool is unavailable, explain that specific limitation.",
+        "",
+        content,
+      ].join("\n");
+      skills[name] = { description, systemPrompt, externalPath: path } satisfies SkillConfig;
+    }
+  }
+  config.skills = skills;
+}
 
 const DEFAULT_CONFIG: WaiConfig = {
   defaultProvider: "qwen",
@@ -142,6 +213,7 @@ export async function loadConfig(): Promise<WaiConfig> {
   }
 
   const config = { ...DEFAULT_CONFIG, ...user, providers } as WaiConfig;
+  await loadExternalSkills(config);
 
   // Migrate: zhipu → glm
   if (config.providers.zhipu) {
@@ -158,7 +230,15 @@ export async function loadConfig(): Promise<WaiConfig> {
 
 export async function saveConfig(config: WaiConfig): Promise<void> {
   await ensureDir(WAI_DIR);
-  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2));
+  const persisted = { ...config };
+  if (persisted.skills) {
+    persisted.skills = Object.fromEntries(
+      Object.entries(persisted.skills)
+        .filter(([, skill]) => !skill.externalPath)
+        .map(([name, skill]) => [name, { ...skill, externalPath: undefined }]),
+    );
+  }
+  await writeFile(CONFIG_PATH, JSON.stringify(persisted, null, 2));
 }
 
 export function getDataDir(): string {

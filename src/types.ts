@@ -162,6 +162,8 @@ export interface SkillConfig {
   systemPrompt: string;
   /** Provider override (optional, falls back to user's current provider) */
   provider?: string;
+  /** Absolute SKILL.md path for dynamically loaded external skills */
+  externalPath?: string;
 }
 
 export interface WaiConfig {
@@ -188,6 +190,9 @@ export interface WaiConfig {
 
   /** Skill presets */
   skills?: Record<string, SkillConfig>;
+
+  /** Directories recursively scanned for Claude-compatible SKILL.md files */
+  skillDirectories?: string[];
 
   /** Global system prompt */
   systemPrompt?: string;
