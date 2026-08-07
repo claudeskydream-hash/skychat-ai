@@ -174,6 +174,9 @@ export interface WaiConfig {
   /** Channel configurations */
   channels: Record<string, ChannelConfig>;
 
+  /** Show an interactive confirmation before reusing saved channel sessions */
+  confirmSavedSessions?: boolean;
+
   /** Per-user provider overrides: senderId -> providerName */
   userRoutes?: Record<string, string>;
 

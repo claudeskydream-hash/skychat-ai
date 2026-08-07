@@ -156,7 +156,7 @@ export class Gateway {
     this.webhook.start();
 
     // Prompt for saved sessions before starting channels
-    if (!process.env.WAI_DAEMON) {
+    if (!process.env.WAI_DAEMON && this.config.confirmSavedSessions !== false) {
       await this.promptSavedSessions();
     }
 
