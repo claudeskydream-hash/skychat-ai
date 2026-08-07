@@ -4,6 +4,8 @@ description: |
   将图文/视频内容自动发布到小红书（XHS），并支持登录检查、内容检索与互动操作。
   使用 Python CDP 脚本（cdp_publish.py / publish_pipeline.py）驱动专用 Chrome 实例完成发布。
   适用场景：发布图文、发布视频、搜索笔记、评论互动、抓取内容数据。
+whenToUse: 当用户提到发小红书、发布小红书、发布笔记、小红书发图、小红书发视频、小红书搜索、小红书评论、小红书互动或抓取小红书数据时使用
+disableModelInvocation: false
 metadata:
   trigger: 发布内容到小红书, 发小红书, 发布笔记, 小红书发图, 小红书发帖
   source: claudeskydream-hash/MySkillHub
