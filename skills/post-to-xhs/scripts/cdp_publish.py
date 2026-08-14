@@ -3515,9 +3515,15 @@ class XiaohongshuPublisher:
                     const rect = node.getBoundingClientRect();
                     return {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }};
                 }};
+                const enabled = (node) => (
+                    visible(node) &&
+                    !node.hasAttribute("disabled") &&
+                    node.getAttribute("aria-disabled") !== "true" &&
+                    !String(node.className || "").includes("disabled")
+                );
 
                 const button = document.querySelector(buttonSelector);
-                if (visible(button)) {{
+                if (enabled(button)) {{
                     return toRect(button);
                 }}
 
@@ -3530,7 +3536,7 @@ class XiaohongshuPublisher:
                     "button, [role='button'], .d-button"
                 );
                 for (const node of buttons) {{
-                    if (!visible(node)) {{
+                    if (!enabled(node)) {{
                         continue;
                     }}
                     const r = node.getBoundingClientRect();
@@ -3558,6 +3564,7 @@ class XiaohongshuPublisher:
                     const rect = node.getBoundingClientRect();
                     if (rect.width === 0 || rect.height === 0) return false;
                     if (node.hasAttribute("disabled")) return false;
+                    if (node.getAttribute("aria-disabled") === "true") return false;
                     if (String(node.className || "").includes("disabled")) return false;
                     return true;
                 }};
@@ -4206,7 +4213,7 @@ class XiaohongshuPublisher:
                 var bodyText = document.body.innerText || '';
                 var links = document.querySelectorAll('a[href*="xiaohongshu.com/explore"]');
                 if (links.length > 0) return JSON.stringify({status:"published",link:links[0].href});
-                var noteId = bodyText.match(/[0-9a-fA-F]{24}/);
+                var noteId = bodyText.match(/\b[0-9a-fA-F]{24}\b/);
                 if (noteId) return JSON.stringify({status:"published",link:"https://www.xiaohongshu.com/explore/"+noteId[0]});
                 if (bodyText.includes('发布成功') || bodyText.includes('已发布')) return JSON.stringify({status:"published",link:null});
                 if (bodyText.includes('草稿') || bodyText.includes('已保存') || bodyText.includes('存为草稿')) return JSON.stringify({status:"draft",link:null});
@@ -4349,7 +4356,7 @@ class XiaohongshuPublisher:
 
 def main():
     import argparse
-    from chrome_launcher import ensure_chrome, restart_chrome
+    from chrome_launcher import detach_managed_chrome, ensure_chrome, restart_chrome
 
     parser = argparse.ArgumentParser(description="Xiaohongshu CDP Publisher")
     parser.add_argument(
@@ -5006,6 +5013,7 @@ def main():
                 restart_chrome(port=port, headless=False, account=account)
             publisher.connect(reuse_existing_tab=reuse_existing_tab)
             publisher.open_login_page()
+            detach_managed_chrome()
             print("LOGIN_READY")
 
         elif args.command == "re-login":
@@ -5016,6 +5024,7 @@ def main():
             publisher.clear_cookies()
             publisher._sleep(1, minimum_seconds=0.5)
             publisher.open_login_page()
+            detach_managed_chrome()
             print("RE_LOGIN_READY")
 
         elif args.command == "switch-account":
@@ -5026,6 +5035,7 @@ def main():
             publisher.clear_cookies()
             publisher._sleep(1, minimum_seconds=0.5)
             publisher.open_login_page()
+            detach_managed_chrome()
             print("SWITCH_ACCOUNT_READY")
 
     finally:

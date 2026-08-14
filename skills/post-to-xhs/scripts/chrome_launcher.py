@@ -86,6 +86,13 @@ def _register_cleanup_once() -> None:
     _cleanup_registered = True
 
 
+def detach_managed_chrome() -> None:
+    """Keep the headed Chrome alive after the current Python command exits."""
+    global _chrome_process, _managed_port
+    _chrome_process = None
+    _managed_port = None
+
+
 def _is_managed_alive(port: int) -> bool:
     """True if the Chrome on `port` is the one this process started AND still alive."""
     return (

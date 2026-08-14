@@ -1,11 +1,9 @@
 ---
-name: RedBookSkills
+name: post-to-xhs
 description: |
   将图文/视频内容自动发布到小红书（XHS），并支持登录检查、内容检索与互动操作。
   使用 Python CDP 脚本（cdp_publish.py / publish_pipeline.py）驱动专用 Chrome 实例完成发布。
   适用场景：发布图文、发布视频、搜索笔记、评论互动、抓取内容数据。
-whenToUse: 当用户提到发小红书、发布小红书、发布笔记、小红书发图、小红书发视频、小红书搜索、小红书评论、小红书互动或抓取小红书数据时使用
-disableModelInvocation: false
 metadata:
   trigger: 发布内容到小红书, 发小红书, 发布笔记, 小红书发图, 小红书发帖
   source: claudeskydream-hash/MySkillHub
@@ -14,6 +12,48 @@ metadata:
 # Post-to-XHS（小红书发布助手）
 
 你是"小红书发布助手"。目标是在用户确认后，调用本 Skill 的脚本完成发布或互动操作。
+
+## SkyChat 调用规则
+
+当系统提示表明当前运行在 SkyChat AI 中时，不要用 bash 直接启动浏览器或
+`publish_pipeline.py`。整理好标题、正文和媒体信息后，必须输出以下任务指令，
+交给 SkyChat Worker 执行截图、登录检查和发布：
+
+```xml
+<intent>{"name":"post_xhs","params":{"title":"标题","content":"正文","sourceUrl":"用户提供的完整网页地址","imageUrls":[],"imagePaths":[],"headless":true}}</intent>
+```
+
+发布成功后需要自动追加一级评论时，增加 `afterPublishComment`：
+
+```xml
+<intent>{"name":"post_xhs","params":{"title":"标题","content":"正文","videoPath":"D:\\AIWorkSpace\\download\\video.mp4","afterPublishComment":"评论内容","headless":true}}</intent>
+```
+
+- 有图片 URL 时填写 `imageUrls`；有本地图片时填写 `imagePaths`。
+- 只有网页地址且没找到有效图片时，保留 `sourceUrl`，Worker 会自动截图。
+- 正常发布使用 `"headless":true`；已知需要登录、上次返回 `NOT_LOGGED_IN`，或用户要求弹出登录窗口时，必须改为 `"headless":false`，让专用 Google Chrome 以有窗口模式打开登录页。
+- 登录场景不得只返回文字提示或二维码；应优先弹出 Google Chrome，供用户直接扫码/登录。登录完成后复用同一专用浏览器配置继续发布。
+- 输出 intent 后不得再直接执行浏览器或发布命令，避免重复发布。
+- `afterPublishComment` 仅在确认笔记发布成功后执行；评论失败时必须明确报告“笔记已发布、评论失败”，不得重发笔记。
+- 可选设置 `XHS_MCP_HTTP_URL`（例如 `http://127.0.0.1:18060`）。CDP 评论失败后，Worker 会调用该服务的 `/api/v1/feeds/comment` 作为一次性兜底；未配置时不会启动或下载外部服务。
+
+## Chrome DevTools MCP 兜底
+
+当 Python/CDP 脚本不存在、启动失败、选择器失效，或 Worker 返回 `CHROME_LAUNCH_FAILED`、`PUBLISH_FAIL` 时，立即改用 `chrome-devtools-browser` 技能，不要重复运行同一失败脚本。
+
+1. 确保小红书专用 Chrome 已在 `http://127.0.0.1:9222` 运行；Chrome DevTools MCP 应使用 `--browserUrl http://127.0.0.1:9222 --allow-unrestricted-paths` 连接，以复用登录状态并上传本地媒体。
+2. 调用 `list_pages`，优先复用已登录的小红书标签页；没有时用 `new_page` 打开创作中心发布页。
+3. 调用 `take_snapshot` 获取最新元素 uid；禁止凭旧 uid 或猜测选择器操作。
+4. 未登录时导航到登录页并保持有窗口 Chrome，等待用户完成登录后继续。
+5. 根据媒体类型点击“上传图文”或“上传视频”，用 `upload_file` 上传本地绝对路径。
+6. 用 `fill_form`（优先）或 `fill` 填写标题、正文和话题；必要时用 `click`、`type_text`、`press_key`。
+7. 发布前再次 `take_snapshot`，核对标题、正文、媒体预览和发布按钮状态。
+8. 用户已经明确要求发布时可点击最终发布按钮；随后用页面文字、URL 或网络请求确认成功，不能只凭点击动作报告成功。
+9. MCP 已接管后不要再输出 `post_xhs` intent，避免 Worker 与 MCP 重复发布。
+
+兜底仅在脚本链路明确失败时启用；正常情况下仍优先使用 SkyChat Worker 和现有 Python/CDP 脚本。
+
+
 
 ## 输入判断
 
@@ -30,7 +70,7 @@ metadata:
 - **自动发布模式（默认开启）**：不再逐一询问用户确认，自动调整标题长度（≤38字符单位）、正文长度（≤1000字）、标签数量（≤10个），确认无误后直接发布。用户提供了来源 URL 但未提供图片时，必须先执行“来源图片获取流程”，不得直接向用户索取图片。
 - 图文发布时，没有图片不得发布（小红书发图文必须有图片）。
 - 视频发布时，没有视频不得发布。图片和视频不可混合使用（二选一）。
-- 默认使用无头模式；若检测到未登录，切换有窗口模式登录。
+- 默认使用无头模式；若检测到未登录，必须切换为有窗口模式并弹出专用 Google Chrome 登录页，不得继续静默重试。
 - **标题长度不超过 38（中文/中文标点/emoji 按 2，英文数字按 1）。超限直接报错拒绝发布。**
 - **正文长度不超过 1000 字。超限直接报错拒绝发布。**
 - **话题（#标签）最多 10 个。超过 10 个直接报错拒绝发布。**（小红书发布页最多支持 10 个话题）
@@ -48,7 +88,7 @@ metadata:
 
 ## 测试浏览器流程（不发布）
 
-1. 启动 post-to-xhs 专用 Chrome（默认有窗口模式，便于人工观察）。
+1. 启动 post-to-xhs 专用 Google Chrome（默认有窗口模式，便于人工观察和登录）。
 2. 如用户要求静默运行，再使用无头模式。
 3. 可选：执行登录状态检查并回传结果。
 4. 结束后如用户要求，关闭测试浏览器实例。
@@ -231,7 +271,8 @@ python scripts/chrome_launcher.py --kill
 ### 0.5) 首次登录 / 重新登录
 
 ```bash
-# 本地 Chrome 登录
+# 先弹出专用 Google Chrome，再进入登录流程
+python scripts/chrome_launcher.py
 python scripts/cdp_publish.py login
 
 # 远程 CDP 登录（不会自动重启远程 Chrome）
@@ -383,12 +424,21 @@ python scripts/cdp_publish.py notes-from-profile --user-id USER_ID --limit 20 --
 
 ## 失败处理
 
+### 发布按钮与结果验证
+
+- 页面上传或处理媒体后，必须重新查询发布按钮，禁止长期持有旧 DOM 节点。
+- 同时检查 `disabled`、`aria-disabled="true"` 和包含 `disabled` 的 class；按钮未就绪时轮询等待，超时后停止，禁止强行点击。
+- 视频处理时间较长时允许延长轮询；轮询过程中每次重新获取按钮，避免页面重渲染导致节点失效。
+- 点击发布后必须通过“发布成功”页面文字、笔记链接、24 位笔记 ID 或明确的失败提示验证结果，不能只凭点击动作报告成功。
+- 自动发布失败或按钮持续不可用时保留页面，返回具体错误，禁止重复发布同一内容。
+
 | 问题 | 解决 |
 |------|------|
 | Chrome 启动超时 | 先执行 `python scripts/chrome_launcher.py --kill` 清理旧进程，再重试 |
-| 登录失败（跳转 /login） | 提示用户手动扫码登录后重试；若需远程展示二维码，改用 `get-login-qrcode` |
+| 登录失败（跳转 /login 或 `NOT_LOGGED_IN`） | 立即以有窗口模式弹出专用 Google Chrome 登录页；在 SkyChat intent 中设置 `headless:false`，不得只提示用户自行处理 |
 | 图片/视频下载失败 | 提示更换 URL 或改用本地文件 |
 | 本地路径不可用 | 优先改用绝对路径；Windows 路径直接传，不需转换 |
 | 评论/回复目标未定位成功 | 提示补充 `comment_id`，或改用 `comment_author` / `comment_snippet` 再试 |
 | 页面选择器失效 | 检查 `scripts/cdp_publish.py` 中 `SELECTORS` 并更新 |
+| Python/CDP 脚本不可用或连续失败 | 切换到 `chrome-devtools-browser`：`list_pages` → `take_snapshot` → 上传/填写 → 发布后验证；不得重复发布 |
 | 视频处理超时 | 视频文件过大，考虑压缩后重试 |

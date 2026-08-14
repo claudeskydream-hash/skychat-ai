@@ -359,6 +359,11 @@ python scripts/chrome_launcher.py --kill
 
 本项目可作为 Claude Code、OpenCode 等支持 Skill 的工具使用，只需将项目复制到 `.claude/skills/post-to-xhs/` 目录，并添加 `SKILL.md` 文件即可。
 
+在 SkyChat AI 中，Skill 会生成 `post_xhs` intent，由 SkyChat Worker 统一执行。
+只有来源网页、没有有效图片时，可传入 `sourceUrl`，Worker 会直接调用本机
+Edge/Chrome 截取来源页面作为发布封面，避免模型拼接 Windows 浏览器命令，
+也不依赖 Python Playwright。
+
 详见 [docs/claude-code-integration.md](docs/claude-code-integration.md)
 
 ## 注意事项
